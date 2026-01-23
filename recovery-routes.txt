@@ -1,0 +1,125 @@
+
+// ============ RECUPERAÇÃO DE SENHA ============
+
+// Armazenar códigos de recuperação temporariamente (em produção usar Redis ou BD)
+const recoveryCodes = new Map();
+
+// Solicitar recuperação de senha - gera código de 6 dígitos
+app.post("/api/recuperar-senha", (req, res) => {
+  const { email } = req.body;
+
+  if (!email) {
+    return res.status(400).json({ erro: "Email é obrigatório." });
+  }
+
+  // Verificar se o email existe
+  db.query("SELECT id_users, userName FROM users WHERE email = ?", [email], (err, rows) => {
+    if (err) {
+      console.error("Erro ao verificar email:", err);
+      return res.status(500).json({ erro: "Erro na base de dados." });
+    }
+
+    if (rows.length === 0) {
+      return res.status(404).json({ erro: "Email não encontrado." });
+    }
+
+    // Gerar código de 6 dígitos
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    
+    // Guardar código com expiração de 15 minutos
+    recoveryCodes.set(email, {
+      code,
+      expiresAt: Date.now() + 15 * 60 * 1000,
+      userId: rows[0].id_users
+    });
+
+    console.log("[RECUPERAR SENHA] Código gerado para", email, ":", code);
+
+    // Em produção, enviar email com o código
+    // Por agora, retornar sucesso (código aparece no console do servidor)
+    res.json({ 
+      sucesso: true, 
+      mensagem: "Código de recuperação enviado para o email.",
+      // REMOVER EM PRODUÇÃO - apenas para testes
+      codigo_teste: code
+    });
+  });
+});
+
+// Verificar código de recuperação
+app.post("/api/verificar-codigo", (req, res) => {
+  const { email, codigo } = req.body;
+
+  if (!email || !codigo) {
+    return res.status(400).json({ erro: "Email e código são obrigatórios." });
+  }
+
+  const recovery = recoveryCodes.get(email);
+
+  if (!recovery) {
+    return res.status(400).json({ erro: "Nenhum código de recuperação encontrado. Solicite um novo." });
+  }
+
+  if (Date.now() > recovery.expiresAt) {
+    recoveryCodes.delete(email);
+    return res.status(400).json({ erro: "Código expirado. Solicite um novo." });
+  }
+
+  if (recovery.code !== codigo) {
+    return res.status(400).json({ erro: "Código inválido." });
+  }
+
+  res.json({ sucesso: true, mensagem: "Código válido." });
+});
+
+// Redefinir senha
+app.post("/api/redefinir-senha", async (req, res) => {
+  const { email, codigo, novaSenha } = req.body;
+
+  if (!email || !codigo || !novaSenha) {
+    return res.status(400).json({ erro: "Todos os campos são obrigatórios." });
+  }
+
+  if (novaSenha.length < 6) {
+    return res.status(400).json({ erro: "A senha deve ter pelo menos 6 caracteres." });
+  }
+
+  const recovery = recoveryCodes.get(email);
+
+  if (!recovery) {
+    return res.status(400).json({ erro: "Nenhum código de recuperação encontrado." });
+  }
+
+  if (Date.now() > recovery.expiresAt) {
+    recoveryCodes.delete(email);
+    return res.status(400).json({ erro: "Código expirado. Solicite um novo." });
+  }
+
+  if (recovery.code !== codigo) {
+    return res.status(400).json({ erro: "Código inválido." });
+  }
+
+  try {
+    // Hash da nova senha
+    const hashedPassword = await bcrypt.hash(novaSenha, 10);
+
+    // Atualizar senha na BD
+    db.query("UPDATE users SET password = ? WHERE email = ?", [hashedPassword, email], (err) => {
+      if (err) {
+        console.error("Erro ao atualizar senha:", err);
+        return res.status(500).json({ erro: "Erro ao atualizar senha." });
+      }
+
+      // Remover código usado
+      recoveryCodes.delete(email);
+
+      console.log("[RECUPERAR SENHA] Senha alterada com sucesso para:", email);
+      res.json({ sucesso: true, mensagem: "Senha alterada com sucesso!" });
+    });
+  } catch (error) {
+    console.error("Erro ao fazer hash da senha:", error);
+    return res.status(500).json({ erro: "Erro ao processar senha." });
+  }
+});
+
+app.listen(5000, () => console.log("Servidor a correr na porta 5000"));
