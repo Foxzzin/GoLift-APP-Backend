@@ -1,4 +1,4 @@
-// server.js
+﻿// server.js
 const express = require("express");
 const cors = require("cors");
 const db = require("./db");
@@ -57,7 +57,7 @@ app.post("/api/login", (req, res) => {
   console.log("Password: " + req.body.password)
 
   if (!email || !password) {
-    return res.status(400).json({ erro: "Email e password são obrigatórios." });
+    return res.status(400).json({ erro: "Email e password sÃ£o obrigatÃ³rios." });
   }
 
   const sql = "SELECT * FROM users WHERE email = ? LIMIT 1";
@@ -69,7 +69,7 @@ app.post("/api/login", (req, res) => {
     }
 
     if (rows.length === 0) {
-      return res.status(401).json({ erro: "Credenciais inválidas1." });
+      return res.status(401).json({ erro: "Credenciais invÃ¡lidas1." });
     }
 
     const user = rows[0];
@@ -78,7 +78,7 @@ app.post("/api/login", (req, res) => {
     const passwordCorreta = await bcrypt.compare(password, user.password);
 
     if (!passwordCorreta) {
-      return res.status(401).json({ erro: "Credenciais inválidas2." });
+      return res.status(401).json({ erro: "Credenciais invÃ¡lidas2." });
     }
 
 
@@ -106,22 +106,22 @@ app.post("/api/login", (req, res) => {
 
 // Rota de registo
 app.post("/api/register", async (req, res) => {
-  const { nome, email, password, idade, peso, altura } = req.body;
+  const { nome, email, password, idade, peso, altura, objetivo, peso_alvo } = req.body;
 
-  if (!nome || !email || !password || !idade || !peso || !altura) {
-    return res.status(400).json({ erro: "Todos os campos são obrigatórios." });
+  if (!nome || !email || !password) {
+    return res.status(400).json({ erro: "Todos os campos sÃ£o obrigatÃ³rios." });
   }
 
   // Verifica email duplicado
   const checkSql = "SELECT * FROM users WHERE email = ? LIMIT 1";
   db.query(checkSql, [email], async (err, rows) => {
     if (err) return res.status(500).json({ erro: "Erro na base de dados." });
-    if (rows.length > 0) return res.status(409).json({ erro: "Email já registado." });
+    if (rows.length > 0) return res.status(409).json({ erro: "Email jÃ¡ registado." });
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    const insertSql = "INSERT INTO users (userName, email, password, idade, peso, altura, created_at) VALUES (?, ?, ?, ?, ?, ?, NOW())";
-    db.query(insertSql, [nome, email, hashedPassword, idade, peso, altura], (err, result) => {
+    const insertSql = "INSERT INTO users (userName, email, password, idade, peso, altura, objetivo, peso_alvo, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())";
+    db.query(insertSql, [nome, email, hashedPassword, idade || null, peso || null, altura || null, objetivo || null, peso_alvo || null], (err, result) => {
       if (err) return res.status(500).json({ erro: "Erro ao criar utilizador." });
 
       res.json({ sucesso: true, mensagem: "Utilizador registado com sucesso!", id: result.insertId });
@@ -133,6 +133,64 @@ app.post("/api/register", async (req, res) => {
 // server.js - ADICIONA ESTAS ROTAS AO TEU SERVIDOR
 
 // Rota para obter dados do perfil do utilizador
+
+// Rota para obter streak do utilizador
+app.get("/api/streak/:userId", (req, res) => {
+  const { userId } = req.params;
+
+  // Query para calcular streak - dias consecutivos de treino
+  const sql = `
+    SELECT DATE(data_criacao) as dia
+    FROM treino
+    WHERE id_users = ?
+    ORDER BY data_criacao DESC
+  `;
+
+  db.query(sql, [userId], (err, rows) => {
+    if (err) {
+      console.error("[API] Erro ao obter streak:", err);
+      return res.status(500).json({ erro: "Erro ao obter streak." });
+    }
+
+    if (!rows || rows.length === 0) {
+      return res.json({ sucesso: true, streak: 0, maxStreak: 0 });
+    }
+
+    // Calcular streak atual
+    let streak = 0;
+    let maxStreak = 0;
+    let currentStreak = 0;
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    
+    const uniqueDays = [...new Set(rows.map(r => new Date(r.dia).toDateString()))];
+    
+    for (let i = 0; i < uniqueDays.length; i++) {
+      const workoutDate = new Date(uniqueDays[i]);
+      const expectedDate = new Date(today);
+      expectedDate.setDate(today.getDate() - i);
+      
+      if (workoutDate.toDateString() === expectedDate.toDateString()) {
+        currentStreak++;
+      } else if (i === 0) {
+        // Se o primeiro dia não é hoje, verifica se foi ontem
+        expectedDate.setDate(today.getDate() - 1);
+        if (workoutDate.toDateString() === expectedDate.toDateString()) {
+          currentStreak++;
+        } else {
+          break;
+        }
+      } else {
+        break;
+      }
+    }
+    
+    streak = currentStreak;
+    maxStreak = Math.max(streak, currentStreak);
+
+    res.json({ sucesso: true, streak, maxStreak, totalDays: uniqueDays.length });
+  });
+});
 app.get("/api/profile/:userId", (req, res) => {
   const { userId } = req.params;
 
@@ -159,15 +217,42 @@ app.get("/api/profile/:userId", (req, res) => {
 
     console.log("[API] /api/profile rows:", rows);
     if (!rows || rows.length === 0) {
-      console.warn("[API] /api/profile - utilizador não encontrado for id:", userId);
-      return res.status(404).json({ erro: "Utilizador não encontrado." });
+      console.warn("[API] /api/profile - utilizador nÃ£o encontrado for id:", userId);
+      return res.status(404).json({ erro: "Utilizador nÃ£o encontrado." });
     }
 
     return res.json({ sucesso: true, user: rows[0] });
   });
 });
 
-// Rota para obter o último treino do utilizador
+// Rota para obter o Ãºltimo treino do utilizador
+
+// Rota para atualizar perfil do utilizador
+app.put("/api/profile/:userId", (req, res) => {
+  const { userId } = req.params;
+  const { nome, idade, peso, altura } = req.body;
+
+  console.log("[API] PUT /api/profile - Atualizando user:", userId, { nome, idade, peso, altura });
+
+  const sql = `
+    UPDATE users 
+    SET userName = ?, idade = ?, peso = ?, altura = ?
+    WHERE id_users = ?
+  `;
+
+  db.query(sql, [nome, idade, peso, altura, userId], (err, result) => {
+    if (err) {
+      console.error("[API] Erro ao atualizar perfil:", err);
+      return res.status(500).json({ erro: "Erro ao atualizar perfil." });
+    }
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ erro: "Utilizador não encontrado." });
+    }
+
+    res.json({ sucesso: true, mensagem: "Perfil atualizado com sucesso!" });
+  });
+});
 app.get("/api/lastWorkout/:userId", (req, res) => {
   const { userId } = req.params;
 
@@ -188,7 +273,7 @@ app.get("/api/lastWorkout/:userId", (req, res) => {
   db.query(sql, [userId], (err, rows) => {
     if (err) {
       console.log(err);
-      return res.status(500).json({ erro: "Erro ao obter último treino." });
+      return res.status(500).json({ erro: "Erro ao obter Ãºltimo treino." });
     }
 
     if (rows.length === 0) {
@@ -199,7 +284,7 @@ app.get("/api/lastWorkout/:userId", (req, res) => {
   });
 });
 
-// Rota para obter recordes pessoais do utilizador (Top 3 exercícios com mais peso)
+// Rota para obter recordes pessoais do utilizador (Top 3 exercÃ­cios com mais peso)
 app.get("/api/records/:userId", (req, res) => {
   const { userId } = req.params;
 
@@ -243,7 +328,7 @@ app.get("/api/admin/stats", (req, res) => {
       stats.totalTreinos = rows2[0].totalTreinos || 0;
 
       db.query("SELECT COUNT(*) as totalExercises FROM exercicios", (err3, rows3) => {
-        if (err3) return res.status(500).json({ erro: "Erro ao obter total de exercícios." });
+        if (err3) return res.status(500).json({ erro: "Erro ao obter total de exercÃ­cios." });
         stats.totalExercises = rows3[0].totalExercises || 0;
 
         db.query("SELECT COUNT(*) as totalAdmins FROM users WHERE id_tipoUser = 1", (err4, rows4) => {
@@ -303,7 +388,7 @@ app.get("/api/admin/exercicios", (req, res) => {
   db.query(sql, (err, rows) => {
     if (err) {
       console.log(err);
-      return res.status(500).json({ erro: "Erro ao obter exercícios." });
+      return res.status(500).json({ erro: "Erro ao obter exercÃ­cios." });
     }
     res.json(rows);
   });
@@ -312,19 +397,19 @@ app.get("/api/admin/exercicios", (req, res) => {
 // Add new exercise (admin)
 app.post("/api/admin/exercicios", (req, res) => {
   const { nome, descricao, video, recorde_pessoal, grupo_tipo, sub_tipo } = req.body;
-  if (!nome) return res.status(400).json({ erro: "Nome do exercício é obrigatório." });
+  if (!nome) return res.status(400).json({ erro: "Nome do exercÃ­cio Ã© obrigatÃ³rio." });
 
   // Prevent duplicates by name
   db.query("SELECT * FROM exercicios WHERE nome = ? LIMIT 1", [nome], (err, rows) => {
     if (err) return res.status(500).json({ erro: "Erro na base de dados." });
-    if (rows.length > 0) return res.status(409).json({ erro: "Exercício já existe." });
+    if (rows.length > 0) return res.status(409).json({ erro: "ExercÃ­cio jÃ¡ existe." });
 
     const insertSql = `INSERT INTO exercicios (nome, descricao, video, recorde_pessoal, grupo_tipo, sub_type, sub_tipo) VALUES (?, ?, ?, ?, ?, ?, ?)`;
     // Note: some schemas may use different column names; try to insert into sub_tipo
     db.query("INSERT INTO exercicios (nome, descricao, video, recorde_pessoal, grupo_tipo, sub_tipo) VALUES (?, ?, ?, ?, ?, ?)", [nome, descricao || null, video || null, recorde_pessoal || null, grupo_tipo || null, sub_tipo || null], (err2, result) => {
       if (err2) {
         console.log(err2);
-        return res.status(500).json({ erro: "Erro ao adicionar exercício." });
+        return res.status(500).json({ erro: "Erro ao adicionar exercÃ­cio." });
       }
       res.json({ sucesso: true, id: result.insertId, nome });
     });
@@ -337,7 +422,7 @@ app.delete("/api/admin/exercicios/:nome", (req, res) => {
   db.query("DELETE FROM exercicios WHERE nome = ?", [nome], (err, result) => {
     if (err) {
       console.log(err);
-      return res.status(500).json({ erro: "Erro ao apagar exercício." });
+      return res.status(500).json({ erro: "Erro ao apagar exercÃ­cio." });
     }
     return res.json({ sucesso: true });
   });
@@ -347,14 +432,14 @@ app.delete("/api/admin/exercicios/:nome", (req, res) => {
 
 // Get all available exercises for users
 app.get("/api/exercicios", (req, res) => {
-  console.log("[API] /api/exercicios - Rota chamada às", new Date().toISOString());
+  console.log("[API] /api/exercicios - Rota chamada Ã s", new Date().toISOString());
   
-  // Verificar se a conexão à BD está ativa
+  // Verificar se a conexÃ£o Ã  BD estÃ¡ ativa
   if (!db) {
-    console.error("[API] /api/exercicios - Conexão à BD não disponível");
+    console.error("[API] /api/exercicios - ConexÃ£o Ã  BD nÃ£o disponÃ­vel");
     return res.status(500).json({ 
-      erro: "Erro de conexão à base de dados.",
-      detalhes: "Conexão não inicializada"
+      erro: "Erro de conexÃ£o Ã  base de dados.",
+      detalhes: "ConexÃ£o nÃ£o inicializada"
     });
   }
 
@@ -371,22 +456,22 @@ app.get("/api/exercicios", (req, res) => {
         message: err.message
       });
       return res.status(500).json({ 
-        erro: "Erro ao obter exercícios.",
+        erro: "Erro ao obter exercÃ­cios.",
         detalhes: err.sqlMessage || err.message,
         code: err.code
       });
     }
     
-    console.log("[API] /api/exercicios - Exercícios encontrados:", rows ? rows.length : 0);
+    console.log("[API] /api/exercicios - ExercÃ­cios encontrados:", rows ? rows.length : 0);
     if (rows && rows.length > 0) {
-      console.log("[API] /api/exercicios - Primeiro exercício:", rows[0]);
+      console.log("[API] /api/exercicios - Primeiro exercÃ­cio:", rows[0]);
     } else {
-      console.warn("[API] /api/exercicios - Nenhum exercício encontrado na base de dados");
+      console.warn("[API] /api/exercicios - Nenhum exercÃ­cio encontrado na base de dados");
     }
     
     // Garantir que sempre retornamos um array, mesmo que vazio
     const result = Array.isArray(rows) ? rows : [];
-    console.log("[API] /api/exercicios - Retornando", result.length, "exercícios");
+    console.log("[API] /api/exercicios - Retornando", result.length, "exercÃ­cios");
     res.json(result);
   });
 });
@@ -398,14 +483,14 @@ app.post("/api/treino", (req, res) => {
   console.log("[API] POST /api/treino - Dados recebidos:", { userId, nome, exercicios, dataRealizacao });
 
   if (!userId || !nome || !exercicios || !Array.isArray(exercicios) || exercicios.length === 0) {
-    console.log("[API] POST /api/treino - Validação falhou");
-    return res.status(400).json({ erro: "userId, nome e lista de exercícios são obrigatórios." });
+    console.log("[API] POST /api/treino - ValidaÃ§Ã£o falhou");
+    return res.status(400).json({ erro: "userId, nome e lista de exercÃ­cios sÃ£o obrigatÃ³rios." });
   }
 
   // Validar nome
   if (nome.trim().length === 0) {
     console.log("[API] POST /api/treino - Nome vazio");
-    return res.status(400).json({ erro: "O nome do treino não pode estar vazio." });
+    return res.status(400).json({ erro: "O nome do treino nÃ£o pode estar vazio." });
   }
 
   // Verificar se o utilizador existe
@@ -415,14 +500,14 @@ app.post("/api/treino", (req, res) => {
       return res.status(500).json({ erro: "Erro na base de dados." });
     }
     if (userRows.length === 0) {
-      return res.status(404).json({ erro: "Utilizador não encontrado." });
+      return res.status(404).json({ erro: "Utilizador nÃ£o encontrado." });
     }
 
-    // Obter o próximo id_treino disponível
+    // Obter o prÃ³ximo id_treino disponÃ­vel
     db.query("SELECT COALESCE(MAX(id_treino), 0) + 1 as nextId FROM treino", (err, idRows) => {
       if (err) {
         console.log(err);
-        return res.status(500).json({ erro: "Erro ao obter próximo ID de treino." });
+        return res.status(500).json({ erro: "Erro ao obter prÃ³ximo ID de treino." });
       }
 
       const newTreinoId = idRows[0].nextId;
@@ -432,7 +517,7 @@ app.post("/api/treino", (req, res) => {
       // Inserir o treino com nome
       console.log("[API] POST /api/treino - Inserindo treino:", { newTreinoId, userId, nome: nome.trim(), dataTreino });
       
-      // Verificar se o campo nome existe na tabela, se não existir, inserir sem nome
+      // Verificar se o campo nome existe na tabela, se nÃ£o existir, inserir sem nome
       db.query("INSERT INTO treino (id_treino, id_users, nome, data_treino) VALUES (?, ?, ?, ?)", 
         [newTreinoId, userId, nome.trim(), dataTreino], (err, result) => {
         if (err) {
@@ -443,19 +528,19 @@ app.post("/api/treino", (req, res) => {
             sqlState: err.sqlState
           });
           
-          // Se o erro for porque o campo nome não existe, tentar sem nome
+          // Se o erro for porque o campo nome nÃ£o existe, tentar sem nome
           if (err.code === 'ER_BAD_FIELD_ERROR' && err.sqlMessage && err.sqlMessage.includes('nome')) {
-            console.log("[API] POST /api/treino - Campo nome não existe, inserindo sem nome");
+            console.log("[API] POST /api/treino - Campo nome nÃ£o existe, inserindo sem nome");
             db.query("INSERT INTO treino (id_treino, id_users, data_treino) VALUES (?, ?, ?)", 
               [newTreinoId, userId, dataTreino], (err2, result2) => {
               if (err2) {
                 console.error("[API] POST /api/treino - Erro ao inserir treino sem nome:", err2);
                 return res.status(500).json({ 
                   erro: "Erro ao criar treino.",
-                  detalhes: "O campo 'nome' não existe na tabela. Execute o script SQL para adicionar o campo."
+                  detalhes: "O campo 'nome' nÃ£o existe na tabela. Execute o script SQL para adicionar o campo."
                 });
               }
-              // Continuar com a inserção dos exercícios mesmo sem nome
+              // Continuar com a inserÃ§Ã£o dos exercÃ­cios mesmo sem nome
               insertExercicios();
             });
             return;
@@ -467,23 +552,23 @@ app.post("/api/treino", (req, res) => {
           });
         }
         
-        // Função para inserir exercícios
+        // FunÃ§Ã£o para inserir exercÃ­cios
         function insertExercicios() {
 
-          // Inserir os exercícios do treino
+          // Inserir os exercÃ­cios do treino
           const exercicioValues = exercicios.map(exId => [newTreinoId, exId]);
           const placeholders = exercicios.map(() => "(?, ?)").join(", ");
           const values = exercicioValues.flat();
 
-          console.log("[API] POST /api/treino - Inserindo exercícios:", exercicios);
+          console.log("[API] POST /api/treino - Inserindo exercÃ­cios:", exercicios);
 
           db.query(`INSERT INTO treino_exercicio (id_treino, id_exercicio) VALUES ${placeholders}`, 
             values, (err2, result2) => {
             if (err2) {
-              console.error("[API] POST /api/treino - Erro ao inserir exercícios:", err2);
-              // Se falhar ao inserir exercícios, apagar o treino criado
+              console.error("[API] POST /api/treino - Erro ao inserir exercÃ­cios:", err2);
+              // Se falhar ao inserir exercÃ­cios, apagar o treino criado
               db.query("DELETE FROM treino WHERE id_treino = ? AND id_users = ?", [newTreinoId, userId]);
-              return res.status(500).json({ erro: "Erro ao adicionar exercícios ao treino." });
+              return res.status(500).json({ erro: "Erro ao adicionar exercÃ­cios ao treino." });
             }
 
             console.log("[API] POST /api/treino - Treino criado com sucesso!");
@@ -505,7 +590,7 @@ app.post("/api/treino", (req, res) => {
 });
 
 // ============================================
-// SESSÕES - Deve vir ANTES de /api/treino/:userId
+// SESSÃ•ES - Deve vir ANTES de /api/treino/:userId
 // ============================================
 // Get all workout sessions for a user (for metrics)
 app.get("/api/sessoes/:userId", (req, res) => {
@@ -533,12 +618,12 @@ app.get("/api/sessoes/:userId", (req, res) => {
   db.query(sql, [userId], (err, rows) => {
     if (err) {
       console.error("[API] /api/sessoes/:userId - Erro:", err);
-      return res.status(500).json({ erro: "Erro ao obter sessões de treino." });
+      return res.status(500).json({ erro: "Erro ao obter sessÃµes de treino." });
     }
 
-    console.log("[API] /api/sessoes/:userId - Sessões encontradas:", rows.length);
+    console.log("[API] /api/sessoes/:userId - SessÃµes encontradas:", rows.length);
     if (rows.length > 0) {
-      console.log("[API] Primeira sessão raw:", rows[0]);
+      console.log("[API] Primeira sessÃ£o raw:", rows[0]);
     }
 
     const sessoes = rows.map(sessao => ({
@@ -552,7 +637,7 @@ app.get("/api/sessoes/:userId", (req, res) => {
       grupo_tipo: sessao.grupo_tipo || null
     }));
 
-    console.log("[API] Sessões mapeadas - primeira:", sessoes.length > 0 ? sessoes[0] : "nenhuma");
+    console.log("[API] SessÃµes mapeadas - primeira:", sessoes.length > 0 ? sessoes[0] : "nenhuma");
     res.json(sessoes);
   });
 });
@@ -561,7 +646,7 @@ app.get("/api/sessoes/:userId", (req, res) => {
 app.get("/api/sessao/detalhes/:sessaoId", (req, res) => {
   const { sessaoId } = req.params;
 
-  // Buscar dados da sessão
+  // Buscar dados da sessÃ£o
   const sqlSessao = `
     SELECT 
       ts.id_sessao,
@@ -578,17 +663,17 @@ app.get("/api/sessao/detalhes/:sessaoId", (req, res) => {
 
   db.query(sqlSessao, [sessaoId], (err, sessaoRows) => {
     if (err) {
-      console.error("[API] /api/sessao/detalhes - Erro ao buscar sessão:", err);
-      return res.status(500).json({ erro: "Erro ao buscar sessão." });
+      console.error("[API] /api/sessao/detalhes - Erro ao buscar sessÃ£o:", err);
+      return res.status(500).json({ erro: "Erro ao buscar sessÃ£o." });
     }
 
     if (sessaoRows.length === 0) {
-      return res.status(404).json({ erro: "Sessão não encontrada." });
+      return res.status(404).json({ erro: "SessÃ£o nÃ£o encontrada." });
     }
 
     const sessao = sessaoRows[0];
 
-    // Buscar exercícios e séries da sessão
+    // Buscar exercÃ­cios e sÃ©ries da sessÃ£o
     const sqlExercicios = `
       SELECT 
         e.id_exercicio,
@@ -604,11 +689,11 @@ app.get("/api/sessao/detalhes/:sessaoId", (req, res) => {
 
     db.query(sqlExercicios, [sessaoId], (err2, seriesRows) => {
       if (err2) {
-        console.error("[API] /api/sessao/detalhes - Erro ao buscar exercícios:", err2);
-        return res.status(500).json({ erro: "Erro ao buscar exercícios." });
+        console.error("[API] /api/sessao/detalhes - Erro ao buscar exercÃ­cios:", err2);
+        return res.status(500).json({ erro: "Erro ao buscar exercÃ­cios." });
       }
 
-      // Agrupar séries por exercício
+      // Agrupar sÃ©ries por exercÃ­cio
       const exerciciosMap = {};
       seriesRows.forEach(serie => {
         if (!exerciciosMap[serie.id_exercicio]) {
@@ -627,7 +712,7 @@ app.get("/api/sessao/detalhes/:sessaoId", (req, res) => {
 
       const exercicios = Object.values(exerciciosMap);
 
-      // Buscar recordes quebrados nesta sessão
+      // Buscar recordes quebrados nesta sessÃ£o
       const sqlRecordes = `
         SELECT 
           e.nome as nome_exercicio,
@@ -693,9 +778,9 @@ app.get("/api/treino/:userId", (req, res) => {
         message: err.message
       });
       
-      // Se o erro for porque o campo nome não existe, tentar query alternativa
+      // Se o erro for porque o campo nome nÃ£o existe, tentar query alternativa
       if (err.code === 'ER_BAD_FIELD_ERROR' && err.sqlMessage && err.sqlMessage.includes('nome')) {
-        console.log("[API] /api/treino/:userId - Campo nome não existe, usando query sem nome");
+        console.log("[API] /api/treino/:userId - Campo nome nÃ£o existe, usando query sem nome");
         const sqlWithoutNome = `
           SELECT 
             t.id_treino,
@@ -719,7 +804,7 @@ app.get("/api/treino/:userId", (req, res) => {
           
           const treinosComExercicios = rows2.map(treino => ({
             id_treino: treino.id_treino,
-            nome: `Treino ${treino.id_treino}`, // Nome padrão se não existir
+            nome: `Treino ${treino.id_treino}`, // Nome padrÃ£o se nÃ£o existir
             data_treino: treino.data_treino,
             num_exercicios: treino.num_exercicios || 0,
             exercicios_nomes: treino.exercicios_nomes || "",
@@ -734,10 +819,10 @@ app.get("/api/treino/:userId", (req, res) => {
       return res.status(500).json({ erro: "Erro ao obter treinos.", detalhes: err.sqlMessage });
     }
     
-    // Obter detalhes dos exercícios para cada treino
+    // Obter detalhes dos exercÃ­cios para cada treino
     const treinosComExercicios = rows.map(treino => ({
       id_treino: treino.id_treino,
-      nome: treino.nome || `Treino ${treino.id_treino}`, // Nome padrão se não existir
+      nome: treino.nome || `Treino ${treino.id_treino}`, // Nome padrÃ£o se nÃ£o existir
       data_treino: treino.data_treino,
       num_exercicios: treino.num_exercicios || 0,
       exercicios_nomes: treino.exercicios_nomes || "",
@@ -758,40 +843,40 @@ app.get("/api/treino/sessao/:sessaoId", (req, res) => {
   
   console.log("===========================================");
   console.log("[API] GET /api/treino/sessao/:sessaoId");
-  console.log("Sessão ID recebido:", sessaoId);
+  console.log("SessÃ£o ID recebido:", sessaoId);
   console.log("Tipo:", typeof sessaoId);
 
-  // 1. Obter dados da sessão
+  // 1. Obter dados da sessÃ£o
   const query1 = "SELECT * FROM treino_sessao WHERE id_sessao = ?";
   console.log("Query 1:", query1, [sessaoId]);
   
   db.query(query1, [sessaoId], (err, sessaoRows) => {
     if (err) {
       console.error("ERRO Query 1:", err);
-      return res.status(500).json({ erro: "Erro ao obter sessão." });
+      return res.status(500).json({ erro: "Erro ao obter sessÃ£o." });
     }
 
     console.log("Resultado Query 1 - Linhas encontradas:", sessaoRows.length);
     console.log("Dados:", sessaoRows);
 
     if (sessaoRows.length === 0) {
-      console.warn("SESSÃO NÃO ENCONTRADA!");
+      console.warn("SESSÃƒO NÃƒO ENCONTRADA!");
       
-      // Debug: ver todas as sessões
+      // Debug: ver todas as sessÃµes
       db.query("SELECT id_sessao, id_treino, id_users FROM treino_sessao ORDER BY id_sessao DESC LIMIT 5", [], (e, all) => {
-        console.log("Últimas 5 sessões na BD:", all);
+        console.log("Ãšltimas 5 sessÃµes na BD:", all);
       });
       
-      return res.status(404).json({ erro: "Sessão não encontrada." });
+      return res.status(404).json({ erro: "SessÃ£o nÃ£o encontrada." });
     }
 
     const sessao = sessaoRows[0];
-    console.log("Sessão encontrada!");
+    console.log("SessÃ£o encontrada!");
     console.log("- id_sessao:", sessao.id_sessao);
     console.log("- id_treino:", sessao.id_treino);
     console.log("- id_users:", sessao.id_users);
 
-    // 2. Obter exercícios do treino
+    // 2. Obter exercÃ­cios do treino
     const query2 = `
       SELECT 
         e.id_exercicio as id,
@@ -808,13 +893,13 @@ app.get("/api/treino/sessao/:sessaoId", (req, res) => {
     db.query(query2, [sessao.id_treino], (err2, exercicios) => {
       if (err2) {
         console.error("ERRO Query 2:", err2);
-        return res.status(500).json({ erro: "Erro ao obter exercícios." });
+        return res.status(500).json({ erro: "Erro ao obter exercÃ­cios." });
       }
 
-      console.log("Resultado Query 2 - Exercícios encontrados:", exercicios.length);
-      console.log("Exercícios:", exercicios);
+      console.log("Resultado Query 2 - ExercÃ­cios encontrados:", exercicios.length);
+      console.log("ExercÃ­cios:", exercicios);
 
-      // 3. Buscar última sessão concluída do mesmo treino para obter dados anteriores
+      // 3. Buscar Ãºltima sessÃ£o concluÃ­da do mesmo treino para obter dados anteriores
       const query3 = `
         SELECT id_sessao
         FROM treino_sessao
@@ -825,20 +910,20 @@ app.get("/api/treino/sessao/:sessaoId", (req, res) => {
         ORDER BY data_fim DESC
         LIMIT 1
       `;
-      console.log("Query 3 (última sessão):", query3, [sessao.id_treino, sessao.id_users, sessaoId]);
+      console.log("Query 3 (Ãºltima sessÃ£o):", query3, [sessao.id_treino, sessao.id_users, sessaoId]);
       
       db.query(query3, [sessao.id_treino, sessao.id_users, sessaoId], (err3, ultimaSessao) => {
         if (err3) {
           console.error("ERRO Query 3:", err3);
-          return res.status(500).json({ erro: "Erro ao buscar sessão anterior." });
+          return res.status(500).json({ erro: "Erro ao buscar sessÃ£o anterior." });
         }
 
-        console.log("Resultado Query 3 - Última sessão:", ultimaSessao);
+        console.log("Resultado Query 3 - Ãšltima sessÃ£o:", ultimaSessao);
 
-        // 4. Se houver sessão anterior, buscar as séries dela
+        // 4. Se houver sessÃ£o anterior, buscar as sÃ©ries dela
         if (ultimaSessao.length > 0) {
           const idSessaoAnterior = ultimaSessao[0].id_sessao;
-          console.log("Sessão anterior encontrada:", idSessaoAnterior);
+          console.log("SessÃ£o anterior encontrada:", idSessaoAnterior);
 
           const query4 = `
             SELECT 
@@ -850,17 +935,17 @@ app.get("/api/treino/sessao/:sessaoId", (req, res) => {
             WHERE id_sessao = ?
             ORDER BY id_exercicio, numero_serie
           `;
-          console.log("Query 4 (séries anteriores):", query4, [idSessaoAnterior]);
+          console.log("Query 4 (sÃ©ries anteriores):", query4, [idSessaoAnterior]);
 
           db.query(query4, [idSessaoAnterior], (err4, seriesAnteriores) => {
             if (err4) {
               console.error("ERRO Query 4:", err4);
-              return res.status(500).json({ erro: "Erro ao obter séries anteriores." });
+              return res.status(500).json({ erro: "Erro ao obter sÃ©ries anteriores." });
             }
 
-            console.log("Resultado Query 4 - Séries anteriores:", seriesAnteriores.length);
+            console.log("Resultado Query 4 - SÃ©ries anteriores:", seriesAnteriores.length);
 
-            // Agrupar séries anteriores por exercício
+            // Agrupar sÃ©ries anteriores por exercÃ­cio
             const exerciciosComSeries = exercicios.map(ex => {
               const seriesDoExercicio = seriesAnteriores.filter(s => s.id_exercicio === ex.id);
               return {
@@ -870,8 +955,8 @@ app.get("/api/treino/sessao/:sessaoId", (req, res) => {
             });
 
             console.log("RESPOSTA FINAL:");
-            console.log("- Total exercícios:", exerciciosComSeries.length);
-            console.log("- Com séries anteriores de sessão:", idSessaoAnterior);
+            console.log("- Total exercÃ­cios:", exerciciosComSeries.length);
+            console.log("- Com sÃ©ries anteriores de sessÃ£o:", idSessaoAnterior);
             console.log("===========================================");
 
             res.json({
@@ -882,16 +967,16 @@ app.get("/api/treino/sessao/:sessaoId", (req, res) => {
             });
           });
         } else {
-          // Sem sessão anterior, retornar sem séries
-          console.log("Nenhuma sessão anterior encontrada");
+          // Sem sessÃ£o anterior, retornar sem sÃ©ries
+          console.log("Nenhuma sessÃ£o anterior encontrada");
 
           const exerciciosComSeries = exercicios.map(ex => ({
             ...ex,
             series: []
           }));
 
-          console.log("RESPOSTA FINAL (sem sessão anterior):");
-          console.log("- Total exercícios:", exerciciosComSeries.length);
+          console.log("RESPOSTA FINAL (sem sessÃ£o anterior):");
+          console.log("- Total exercÃ­cios:", exerciciosComSeries.length);
           console.log("===========================================");
 
           res.json({
@@ -918,12 +1003,12 @@ app.get("/api/treino/:userId/:treinoId", (req, res) => {
     }
 
     if (treinoRows.length === 0) {
-      return res.status(404).json({ erro: "Treino não encontrado." });
+      return res.status(404).json({ erro: "Treino nÃ£o encontrado." });
     }
 
     const treino = treinoRows[0];
 
-    // Obter exercícios do treino
+    // Obter exercÃ­cios do treino
     const sql = `
       SELECT 
         e.id_exercicio as id,
@@ -939,8 +1024,8 @@ app.get("/api/treino/:userId/:treinoId", (req, res) => {
 
     db.query(sql, [treinoId], (err2, exercicioRows) => {
       if (err2) {
-        console.error("[API] /api/treino/:userId/:treinoId - Erro ao obter exercícios:", err2);
-        return res.status(500).json({ erro: "Erro ao obter exercícios do treino." });
+        console.error("[API] /api/treino/:userId/:treinoId - Erro ao obter exercÃ­cios:", err2);
+        return res.status(500).json({ erro: "Erro ao obter exercÃ­cios do treino." });
       }
 
       res.json({
@@ -953,7 +1038,7 @@ app.get("/api/treino/:userId/:treinoId", (req, res) => {
   });
 });
 
-// Update workout (treino) - Editar nome e exercícios
+// Update workout (treino) - Editar nome e exercÃ­cios
 app.put("/api/treino/:userId/:treinoId", (req, res) => {
   const { userId, treinoId } = req.params;
   const { nome, exercicios } = req.body;
@@ -968,7 +1053,7 @@ app.put("/api/treino/:userId/:treinoId", (req, res) => {
     }
 
     if (treinoRows.length === 0) {
-      return res.status(404).json({ erro: "Treino não encontrado." });
+      return res.status(404).json({ erro: "Treino nÃ£o encontrado." });
     }
 
     // Atualizar nome se fornecido
@@ -980,25 +1065,25 @@ app.put("/api/treino/:userId/:treinoId", (req, res) => {
           return res.status(500).json({ erro: "Erro ao atualizar nome do treino.", detalhes: err2.sqlMessage });
         }
 
-        // Após atualizar nome, atualizar exercícios se fornecidos
+        // ApÃ³s atualizar nome, atualizar exercÃ­cios se fornecidos
         atualizarExercicios();
       });
     } else {
-      // Se não há nome para atualizar, atualizar exercícios diretamente
+      // Se nÃ£o hÃ¡ nome para atualizar, atualizar exercÃ­cios diretamente
       atualizarExercicios();
     }
 
     function atualizarExercicios() {
-      // Atualizar exercícios se fornecidos
+      // Atualizar exercÃ­cios se fornecidos
       if (exercicios && Array.isArray(exercicios)) {
-        // Apagar exercícios antigos
+        // Apagar exercÃ­cios antigos
         db.query("DELETE FROM treino_exercicio WHERE id_treino = ?", [treinoId], (err3) => {
           if (err3) {
-            console.error("[API] PUT /api/treino/:userId/:treinoId - Erro ao apagar exercícios:", err3);
-            return res.status(500).json({ erro: "Erro ao atualizar exercícios.", detalhes: err3.sqlMessage });
+            console.error("[API] PUT /api/treino/:userId/:treinoId - Erro ao apagar exercÃ­cios:", err3);
+            return res.status(500).json({ erro: "Erro ao atualizar exercÃ­cios.", detalhes: err3.sqlMessage });
           }
 
-          // Inserir novos exercícios
+          // Inserir novos exercÃ­cios
           if (exercicios.length > 0) {
             const exercicioValues = exercicios.map(exId => [treinoId, exId]);
             const placeholders = exercicios.map(() => "(?, ?)").join(", ");
@@ -1007,20 +1092,20 @@ app.put("/api/treino/:userId/:treinoId", (req, res) => {
             db.query(`INSERT INTO treino_exercicio (id_treino, id_exercicio) VALUES ${placeholders}`, 
               values, (err4) => {
               if (err4) {
-                console.error("[API] PUT /api/treino/:userId/:treinoId - Erro ao inserir exercícios:", err4);
-                return res.status(500).json({ erro: "Erro ao atualizar exercícios.", detalhes: err4.sqlMessage });
+                console.error("[API] PUT /api/treino/:userId/:treinoId - Erro ao inserir exercÃ­cios:", err4);
+                return res.status(500).json({ erro: "Erro ao atualizar exercÃ­cios.", detalhes: err4.sqlMessage });
               }
 
               console.log("[API] PUT /api/treino/:userId/:treinoId - Treino atualizado com sucesso!");
               res.json({ sucesso: true, mensagem: "Treino atualizado com sucesso!" });
             });
           } else {
-            console.log("[API] PUT /api/treino/:userId/:treinoId - Treino atualizado (sem exercícios)!");
+            console.log("[API] PUT /api/treino/:userId/:treinoId - Treino atualizado (sem exercÃ­cios)!");
             res.json({ sucesso: true, mensagem: "Treino atualizado com sucesso!" });
           }
         });
       } else {
-        // Se não há exercícios para atualizar, apenas retornar sucesso
+        // Se nÃ£o hÃ¡ exercÃ­cios para atualizar, apenas retornar sucesso
         console.log("[API] PUT /api/treino/:userId/:treinoId - Treino atualizado (apenas nome)!");
         res.json({ sucesso: true, mensagem: "Treino atualizado com sucesso!" });
       }
@@ -1042,14 +1127,14 @@ app.delete("/api/treino/:userId/:treinoId", (req, res) => {
     }
 
     if (treinoRows.length === 0) {
-      return res.status(404).json({ erro: "Treino não encontrado." });
+      return res.status(404).json({ erro: "Treino nÃ£o encontrado." });
     }
 
-    // Apagar exercícios do treino
+    // Apagar exercÃ­cios do treino
     db.query("DELETE FROM treino_exercicio WHERE id_treino = ?", [treinoId], (err2) => {
       if (err2) {
-        console.error("[API] DELETE /api/treino/:userId/:treinoId - Erro ao apagar exercícios:", err2);
-        return res.status(500).json({ erro: "Erro ao apagar exercícios do treino." });
+        console.error("[API] DELETE /api/treino/:userId/:treinoId - Erro ao apagar exercÃ­cios:", err2);
+        return res.status(500).json({ erro: "Erro ao apagar exercÃ­cios do treino." });
       }
 
       // Apagar treino
@@ -1083,24 +1168,24 @@ app.post("/api/treino/:userId/:treinoId/iniciar", (req, res) => {
     console.log("Treinos encontrados:", treinoRows.length);
 
     if (treinoRows.length === 0) {
-      console.warn("TREINO NÃO ENCONTRADO!");
-      return res.status(404).json({ erro: "Treino não encontrado." });
+      console.warn("TREINO NÃƒO ENCONTRADO!");
+      return res.status(404).json({ erro: "Treino nÃ£o encontrado." });
     }
 
-    console.log("Treino OK! Criando sessão...");
+    console.log("Treino OK! Criando sessÃ£o...");
     
-    // Criar sessão de treino
+    // Criar sessÃ£o de treino
     db.query("INSERT INTO treino_sessao (id_treino, id_users, data_inicio) VALUES (?, ?, NOW())", 
       [treinoId, userId], (err2, result) => {
       if (err2) {
-        console.error("ERRO ao criar sessão:", err2);
+        console.error("ERRO ao criar sessÃ£o:", err2);
         return res.status(500).json({ erro: "Erro ao iniciar treino." });
       }
 
       const sessionId = result.insertId;
-      console.log("✓ SESSÃO CRIADA COM SUCESSO!");
-      console.log("✓ ID da sessão:", sessionId);
-      console.log("✓ Retornando para o frontend...");
+      console.log("âœ“ SESSÃƒO CRIADA COM SUCESSO!");
+      console.log("âœ“ ID da sessÃ£o:", sessionId);
+      console.log("âœ“ Retornando para o frontend...");
       console.log("===========================================");
       
       res.json({ 
@@ -1116,7 +1201,7 @@ app.post("/api/treino/sessao/:sessaoId/terminar", (req, res) => {
   const { sessaoId } = req.params;
   const { duracao_segundos } = req.body;
 
-  console.log("[API] POST /api/treino/sessao/:sessaoId/terminar - Terminando sessão:", { sessaoId, duracao_segundos });
+  console.log("[API] POST /api/treino/sessao/:sessaoId/terminar - Terminando sessÃ£o:", { sessaoId, duracao_segundos });
 
   db.query("UPDATE treino_sessao SET data_fim = NOW(), duracao_segundos = ? WHERE id_sessao = ?", 
     [duracao_segundos, sessaoId], (err) => {
@@ -1129,29 +1214,29 @@ app.post("/api/treino/sessao/:sessaoId/terminar", (req, res) => {
   });
 });
 
-// Save workout set - Guardar série (suporta cardio: distância/tempo)
+// Save workout set - Guardar sÃ©rie (suporta cardio: distÃ¢ncia/tempo)
 app.post("/api/treino/sessao/:sessaoId/serie", (req, res) => {
   const { sessaoId } = req.params;
   const { id_exercicio, numero_serie, repeticoes, peso, distancia_km, tempo_segundos } = req.body;
 
-  console.log("[API] POST /api/treino/sessao/:sessaoId/serie - Guardando série:", { sessaoId, id_exercicio, numero_serie, repeticoes, peso, distancia_km, tempo_segundos });
+  console.log("[API] POST /api/treino/sessao/:sessaoId/serie - Guardando sÃ©rie:", { sessaoId, id_exercicio, numero_serie, repeticoes, peso, distancia_km, tempo_segundos });
 
   const distancia = distancia_km !== undefined ? parseFloat(distancia_km) : (peso !== undefined ? parseFloat(peso) : null);
   const tempo = tempo_segundos !== undefined ? parseInt(tempo_segundos, 10) : (repeticoes !== undefined ? parseInt(repeticoes, 10) : null);
   const isCardio = distancia_km !== undefined || tempo_segundos !== undefined;
 
   if (!id_exercicio || !numero_serie) {
-    return res.status(400).json({ erro: "id_exercicio e numero_serie são obrigatórios." });
+    return res.status(400).json({ erro: "id_exercicio e numero_serie sÃ£o obrigatÃ³rios." });
   }
 
   if (isCardio) {
     const distanciaValida = distancia !== null && !Number.isNaN(distancia) && distancia > 0;
     const tempoValido = tempo !== null && !Number.isNaN(tempo) && tempo > 0;
     if (!distanciaValida || !tempoValido) {
-      return res.status(400).json({ erro: "Para cardio, informe distância (>0) e tempo (>0)." });
+      return res.status(400).json({ erro: "Para cardio, informe distÃ¢ncia (>0) e tempo (>0)." });
     }
   } else if (tempo === null || Number.isNaN(tempo)) {
-    return res.status(400).json({ erro: "repeticoes são obrigatórias." });
+    return res.status(400).json({ erro: "repeticoes sÃ£o obrigatÃ³rias." });
   }
 
   db.query(
@@ -1160,10 +1245,10 @@ app.post("/api/treino/sessao/:sessaoId/serie", (req, res) => {
     (err, result) => {
       if (err) {
         console.error("[API] POST /api/treino/sessao/:sessaoId/serie - Erro:", err);
-        return res.status(500).json({ erro: "Erro ao guardar série." });
+        return res.status(500).json({ erro: "Erro ao guardar sÃ©rie." });
       }
 
-      res.json({ sucesso: true, mensagem: "Série guardada com sucesso!", id_serie: result?.insertId });
+      res.json({ sucesso: true, mensagem: "SÃ©rie guardada com sucesso!", id_serie: result?.insertId });
     }
   );
 });
@@ -1173,7 +1258,7 @@ app.post("/api/treino/sessao/:sessaoId/finalizar", (req, res) => {
   const { sessaoId } = req.params;
   const { duracao_segundos } = req.body;
 
-  console.log("[API] POST /api/treino/sessao/:sessaoId/finalizar - Finalizando sessão:", { sessaoId, duracao_segundos });
+  console.log("[API] POST /api/treino/sessao/:sessaoId/finalizar - Finalizando sessÃ£o:", { sessaoId, duracao_segundos });
 
   db.query("UPDATE treino_sessao SET data_fim = NOW(), duracao_segundos = ? WHERE id_sessao = ?", 
     [duracao_segundos, sessaoId], (err) => {
@@ -1190,23 +1275,23 @@ app.post("/api/treino/sessao/:sessaoId/finalizar", (req, res) => {
 app.delete("/api/treino/sessao/:sessaoId/cancelar", (req, res) => {
   const { sessaoId } = req.params;
 
-  console.log("[API] DELETE /api/treino/sessao/:sessaoId/cancelar - Cancelando sessão:", sessaoId);
+  console.log("[API] DELETE /api/treino/sessao/:sessaoId/cancelar - Cancelando sessÃ£o:", sessaoId);
 
-  // Primeiro apagar as séries desta sessão
+  // Primeiro apagar as sÃ©ries desta sessÃ£o
   db.query("DELETE FROM treino_serie WHERE id_sessao = ?", [sessaoId], (err) => {
     if (err) {
-      console.error("[API] DELETE /api/treino/sessao/:sessaoId/cancelar - Erro ao apagar séries:", err);
+      console.error("[API] DELETE /api/treino/sessao/:sessaoId/cancelar - Erro ao apagar sÃ©ries:", err);
       return res.status(500).json({ erro: "Erro ao cancelar treino." });
     }
 
-    // Depois apagar a sessão
+    // Depois apagar a sessÃ£o
     db.query("DELETE FROM treino_sessao WHERE id_sessao = ?", [sessaoId], (err2) => {
       if (err2) {
-        console.error("[API] DELETE /api/treino/sessao/:sessaoId/cancelar - Erro ao apagar sessão:", err2);
+        console.error("[API] DELETE /api/treino/sessao/:sessaoId/cancelar - Erro ao apagar sessÃ£o:", err2);
         return res.status(500).json({ erro: "Erro ao cancelar treino." });
       }
 
-      console.log("[API] DELETE /api/treino/sessao/:sessaoId/cancelar - Sessão cancelada com sucesso!");
+      console.log("[API] DELETE /api/treino/sessao/:sessaoId/cancelar - SessÃ£o cancelada com sucesso!");
       res.json({ sucesso: true, mensagem: "Treino cancelado com sucesso!" });
     });
   });
@@ -1243,7 +1328,7 @@ app.get("/api/recordes/:userId", (req, res) => {
 app.get("/api/treino/detalhes/:treinoId/:dataIso", (req, res) => {
   const { treinoId, dataIso } = req.params;
 
-  // Buscar informações do treino
+  // Buscar informaÃ§Ãµes do treino
   db.query("SELECT * FROM treino WHERE id_treino = ?", [treinoId], (err, treinoRows) => {
     if (err) {
       console.error("[API] /api/treino/detalhes - Erro:", err);
@@ -1251,12 +1336,12 @@ app.get("/api/treino/detalhes/:treinoId/:dataIso", (req, res) => {
     }
 
     if (treinoRows.length === 0) {
-      return res.status(404).json({ erro: "Treino não encontrado." });
+      return res.status(404).json({ erro: "Treino nÃ£o encontrado." });
     }
 
     const treino = treinoRows[0];
 
-    // Primeiro buscar exercícios do treino
+    // Primeiro buscar exercÃ­cios do treino
     const sqlExercicios = `
       SELECT 
         e.id_exercicio,
@@ -1269,8 +1354,8 @@ app.get("/api/treino/detalhes/:treinoId/:dataIso", (req, res) => {
 
     db.query(sqlExercicios, [treinoId], (err2, exerciciosRows) => {
       if (err2) {
-        console.error("[API] /api/treino/detalhes - Erro ao buscar exercícios:", err2);
-        return res.status(500).json({ erro: "Erro ao buscar exercícios." });
+        console.error("[API] /api/treino/detalhes - Erro ao buscar exercÃ­cios:", err2);
+        return res.status(500).json({ erro: "Erro ao buscar exercÃ­cios." });
       }
 
       if (exerciciosRows.length === 0) {
@@ -1281,22 +1366,22 @@ app.get("/api/treino/detalhes/:treinoId/:dataIso", (req, res) => {
         });
       }
 
-      // Buscar sessão pela data específica
+      // Buscar sessÃ£o pela data especÃ­fica
       const dataInicio = `${dataIso}%`;
-      console.log("[API] Buscando sessão - treinoId:", treinoId, "dataIso:", dataIso, "pattern:", dataInicio);
+      console.log("[API] Buscando sessÃ£o - treinoId:", treinoId, "dataIso:", dataIso, "pattern:", dataInicio);
       
       db.query(
         "SELECT id_sessao, data_inicio FROM treino_sessao WHERE id_treino = ? AND DATE(data_inicio) = ? ORDER BY data_inicio DESC LIMIT 1",
         [treinoId, dataIso],
         (err3, sessaoRows) => {
-          console.log("[API] Sessões encontradas:", sessaoRows ? sessaoRows.length : 0);
+          console.log("[API] SessÃµes encontradas:", sessaoRows ? sessaoRows.length : 0);
           if (sessaoRows && sessaoRows.length > 0) {
-            console.log("[API] Sessão ID:", sessaoRows[0].id_sessao, "Data:", sessaoRows[0].data_inicio);
+            console.log("[API] SessÃ£o ID:", sessaoRows[0].id_sessao, "Data:", sessaoRows[0].data_inicio);
           }
 
-          // Se não houver sessão, retornar exercícios sem séries
+          // Se nÃ£o houver sessÃ£o, retornar exercÃ­cios sem sÃ©ries
           if (err3 || sessaoRows.length === 0) {
-            console.log("[API] Nenhuma sessão encontrada, retornando exercícios sem séries");
+            console.log("[API] Nenhuma sessÃ£o encontrada, retornando exercÃ­cios sem sÃ©ries");
             const exercicios = exerciciosRows.map(ex => ({
               nome: ex.exercicio,
               series: []
@@ -1310,9 +1395,9 @@ app.get("/api/treino/detalhes/:treinoId/:dataIso", (req, res) => {
           }
 
           const sessaoId = sessaoRows[0].id_sessao;
-          console.log("[API] Buscando séries para sessão:", sessaoId);
+          console.log("[API] Buscando sÃ©ries para sessÃ£o:", sessaoId);
 
-          // Buscar séries da sessão
+          // Buscar sÃ©ries da sessÃ£o
           const sqlSeries = `
             SELECT 
               ts.id_exercicio,
@@ -1326,15 +1411,15 @@ app.get("/api/treino/detalhes/:treinoId/:dataIso", (req, res) => {
 
           db.query(sqlSeries, [sessaoId], (err4, seriesRows) => {
             if (err4) {
-              console.error("[API] /api/treino/detalhes - Erro ao buscar séries:", err4);
+              console.error("[API] /api/treino/detalhes - Erro ao buscar sÃ©ries:", err4);
             }
 
-            console.log("[API] Séries encontradas:", seriesRows ? seriesRows.length : 0);
+            console.log("[API] SÃ©ries encontradas:", seriesRows ? seriesRows.length : 0);
             if (seriesRows && seriesRows.length > 0) {
-              console.log("[API] Primeira série:", seriesRows[0]);
+              console.log("[API] Primeira sÃ©rie:", seriesRows[0]);
             }
 
-            // Criar mapa de séries por exercício
+            // Criar mapa de sÃ©ries por exercÃ­cio
             const seriesMap = {};
             (seriesRows || []).forEach(row => {
               if (!seriesMap[row.id_exercicio]) {
@@ -1385,7 +1470,7 @@ app.get("/api/treino-admin", (req, res) => {
       return res.json([]);
     }
 
-    // Obter exercícios para cada treino
+    // Obter exercÃ­cios para cada treino
     const resultado = [];
     let processados = 0;
 
@@ -1400,7 +1485,7 @@ app.get("/api/treino-admin", (req, res) => {
 
       db.query(sqlExercicos, [treino.id_treino_admin], (err, exerciciosRows) => {
         if (err) {
-          console.error("Erro ao obter exercícios do treino admin:", err);
+          console.error("Erro ao obter exercÃ­cios do treino admin:", err);
           exerciciosRows = [];
         }
 
@@ -1424,7 +1509,7 @@ app.get("/api/treino-admin", (req, res) => {
   });
 });
 
-// GET - Obter detalhes de um treino de admin específico
+// GET - Obter detalhes de um treino de admin especÃ­fico
 app.get("/api/treino-admin/:id", (req, res) => {
   const { id } = req.params;
 
@@ -1441,7 +1526,7 @@ app.get("/api/treino-admin/:id", (req, res) => {
     }
 
     if (treinosRows.length === 0) {
-      return res.status(404).json({ erro: "Treino não encontrado." });
+      return res.status(404).json({ erro: "Treino nÃ£o encontrado." });
     }
 
     const treino = treinosRows[0];
@@ -1456,7 +1541,7 @@ app.get("/api/treino-admin/:id", (req, res) => {
 
     db.query(sqlExercicos, [id], (err, exerciciosRows) => {
       if (err) {
-        console.error("Erro ao obter exercícios:", err);
+        console.error("Erro ao obter exercÃ­cios:", err);
         exerciciosRows = [];
       }
 
@@ -1480,7 +1565,7 @@ app.post("/api/treino-admin", (req, res) => {
   if (!nome || !Array.isArray(exercicios) || exercicios.length === 0) {
     return res.status(400).json({
       sucesso: false,
-      erro: "Nome e exercícios são obrigatórios.",
+      erro: "Nome e exercÃ­cios sÃ£o obrigatÃ³rios.",
     });
   }
 
@@ -1497,7 +1582,7 @@ app.post("/api/treino-admin", (req, res) => {
 
     const treinoAdminId = result.insertId;
 
-    // Inserir exercícios
+    // Inserir exercÃ­cios
     const sqlInsertExercicos = `
       INSERT INTO treino_admin_exercicio (id_treino_admin, id_exercicio)
       VALUES (?, ?)
@@ -1509,7 +1594,7 @@ app.post("/api/treino-admin", (req, res) => {
     exercicios.forEach((exercicioId) => {
       db.query(sqlInsertExercicos, [treinoAdminId, exercicioId], (err) => {
         if (err) {
-          console.error("Erro ao inserir exercício no treino admin:", err);
+          console.error("Erro ao inserir exercÃ­cio no treino admin:", err);
           erroOcorreu = true;
         }
         inseridos++;
@@ -1518,7 +1603,7 @@ app.post("/api/treino-admin", (req, res) => {
           if (erroOcorreu) {
             return res.status(500).json({ 
               sucesso: false, 
-              erro: "Erro ao adicionar alguns exercícios ao treino." 
+              erro: "Erro ao adicionar alguns exercÃ­cios ao treino." 
             });
           }
           res.json({
@@ -1540,7 +1625,7 @@ app.put("/api/treino-admin/:id", (req, res) => {
   if (!nome || !Array.isArray(exercicios) || exercicios.length === 0) {
     return res.status(400).json({
       sucesso: false,
-      erro: "Nome e exercícios são obrigatórios.",
+      erro: "Nome e exercÃ­cios sÃ£o obrigatÃ³rios.",
     });
   }
 
@@ -1552,12 +1637,12 @@ app.put("/api/treino-admin/:id", (req, res) => {
       return res.status(500).json({ sucesso: false, erro: "Erro ao atualizar treino." });
     }
 
-    // Deletar exercícios antigos
+    // Deletar exercÃ­cios antigos
     const sqlDeleteExercicos = "DELETE FROM treino_admin_exercicio WHERE id_treino_admin = ?";
     db.query(sqlDeleteExercicos, [id], (err) => {
       if (err) {
-        console.error("Erro ao deletar exercícios antigos:", err);
-        return res.status(500).json({ sucesso: false, erro: "Erro ao atualizar exercícios." });
+        console.error("Erro ao deletar exercÃ­cios antigos:", err);
+        return res.status(500).json({ sucesso: false, erro: "Erro ao atualizar exercÃ­cios." });
       }
 
       if (exercicios.length === 0) {
@@ -1568,7 +1653,7 @@ app.put("/api/treino-admin/:id", (req, res) => {
         });
       }
 
-      // Inserir novos exercícios
+      // Inserir novos exercÃ­cios
       const sqlInsertExercicos = `
         INSERT INTO treino_admin_exercicio (id_treino_admin, id_exercicio)
         VALUES (?, ?)
@@ -1581,7 +1666,7 @@ app.put("/api/treino-admin/:id", (req, res) => {
       exercicios.forEach((exercicioId) => {
         db.query(sqlInsertExercicos, [id, exercicioId], (err) => {
           if (err) {
-            console.error(`Erro ao inserir exercício ${exercicioId}:`, err);
+            console.error(`Erro ao inserir exercÃ­cio ${exercicioId}:`, err);
             erroOcorreu = true;
             erros.push(exercicioId);
           }
@@ -1591,7 +1676,7 @@ app.put("/api/treino-admin/:id", (req, res) => {
             if (erroOcorreu) {
               return res.status(500).json({ 
                 sucesso: false, 
-                erro: `Erro ao adicionar exercícios: ${erros.join(', ')}` 
+                erro: `Erro ao adicionar exercÃ­cios: ${erros.join(', ')}` 
               });
             }
             res.json({
@@ -1624,17 +1709,17 @@ app.delete("/api/treino-admin/:id", (req, res) => {
 });
 
 
-// ============ RECUPERA��O DE SENHA ============
+// ============ RECUPERAÇÃO DE SENHA ============
 
-// Armazenar c�digos de recupera��o temporariamente (em produ��o usar Redis ou BD)
+// Armazenar códigos de recuperação temporariamente (em produção usar Redis ou BD)
 const recoveryCodes = new Map();
 
-// Solicitar recupera��o de senha - gera c�digo de 6 d�gitos
+// Solicitar recuperação de senha - gera código de 6 dígitos
 app.post("/api/recuperar-senha", (req, res) => {
   const { email } = req.body;
 
   if (!email) {
-    return res.status(400).json({ erro: "Email � obrigat�rio." });
+    return res.status(400).json({ erro: "Email é obrigatório." });
   }
 
   // Verificar se o email existe
@@ -1645,56 +1730,56 @@ app.post("/api/recuperar-senha", (req, res) => {
     }
 
     if (rows.length === 0) {
-      return res.status(404).json({ erro: "Email n�o encontrado." });
+      return res.status(404).json({ erro: "Email não encontrado." });
     }
 
-    // Gerar c�digo de 6 d�gitos
+    // Gerar código de 6 dígitos
     const code = Math.floor(100000 + Math.random() * 900000).toString();
     
-    // Guardar c�digo com expira��o de 15 minutos
+    // Guardar código com expiração de 15 minutos
     recoveryCodes.set(email, {
       code,
       expiresAt: Date.now() + 15 * 60 * 1000,
       userId: rows[0].id_users
     });
 
-    console.log("[RECUPERAR SENHA] C�digo gerado para", email, ":", code);
+    console.log("[RECUPERAR SENHA] Código gerado para", email, ":", code);
 
-    // Em produ��o, enviar email com o c�digo
-    // Por agora, retornar sucesso (c�digo aparece no console do servidor)
+    // Em produção, enviar email com o código
+    // Por agora, retornar sucesso (código aparece no console do servidor)
     res.json({ 
       sucesso: true, 
-      mensagem: "C�digo de recupera��o enviado para o email.",
-      // REMOVER EM PRODU��O - apenas para testes
+      mensagem: "Código de recuperação enviado para o email.",
+      // REMOVER EM PRODUÇÃO - apenas para testes
       codigo_teste: code
     });
   });
 });
 
-// Verificar c�digo de recupera��o
+// Verificar código de recuperação
 app.post("/api/verificar-codigo", (req, res) => {
   const { email, codigo } = req.body;
 
   if (!email || !codigo) {
-    return res.status(400).json({ erro: "Email e c�digo s�o obrigat�rios." });
+    return res.status(400).json({ erro: "Email e código são obrigatórios." });
   }
 
   const recovery = recoveryCodes.get(email);
 
   if (!recovery) {
-    return res.status(400).json({ erro: "Nenhum c�digo de recupera��o encontrado. Solicite um novo." });
+    return res.status(400).json({ erro: "Nenhum código de recuperação encontrado. Solicite um novo." });
   }
 
   if (Date.now() > recovery.expiresAt) {
     recoveryCodes.delete(email);
-    return res.status(400).json({ erro: "C�digo expirado. Solicite um novo." });
+    return res.status(400).json({ erro: "Código expirado. Solicite um novo." });
   }
 
   if (recovery.code !== codigo) {
-    return res.status(400).json({ erro: "C�digo inv�lido." });
+    return res.status(400).json({ erro: "Código inválido." });
   }
 
-  res.json({ sucesso: true, mensagem: "C�digo v�lido." });
+  res.json({ sucesso: true, mensagem: "Código válido." });
 });
 
 // Redefinir senha
@@ -1702,7 +1787,7 @@ app.post("/api/redefinir-senha", async (req, res) => {
   const { email, codigo, novaSenha } = req.body;
 
   if (!email || !codigo || !novaSenha) {
-    return res.status(400).json({ erro: "Todos os campos s�o obrigat�rios." });
+    return res.status(400).json({ erro: "Todos os campos são obrigatórios." });
   }
 
   if (novaSenha.length < 6) {
@@ -1712,16 +1797,16 @@ app.post("/api/redefinir-senha", async (req, res) => {
   const recovery = recoveryCodes.get(email);
 
   if (!recovery) {
-    return res.status(400).json({ erro: "Nenhum c�digo de recupera��o encontrado." });
+    return res.status(400).json({ erro: "Nenhum código de recuperação encontrado." });
   }
 
   if (Date.now() > recovery.expiresAt) {
     recoveryCodes.delete(email);
-    return res.status(400).json({ erro: "C�digo expirado. Solicite um novo." });
+    return res.status(400).json({ erro: "Código expirado. Solicite um novo." });
   }
 
   if (recovery.code !== codigo) {
-    return res.status(400).json({ erro: "C�digo inv�lido." });
+    return res.status(400).json({ erro: "Código inválido." });
   }
 
   try {
@@ -1735,7 +1820,7 @@ app.post("/api/redefinir-senha", async (req, res) => {
         return res.status(500).json({ erro: "Erro ao atualizar senha." });
       }
 
-      // Remover c�digo usado
+      // Remover código usado
       recoveryCodes.delete(email);
 
       console.log("[RECUPERAR SENHA] Senha alterada com sucesso para:", email);
@@ -1747,6 +1832,10 @@ app.post("/api/redefinir-senha", async (req, res) => {
   }
 });
 
-app.listen(5000, () => console.log("Servidor a correr na porta 5000"));
+app.listen(5000, "0.0.0.0", () => console.log("Servidor a correr na porta 5000"));
+
+
+
+
 
 
