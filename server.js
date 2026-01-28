@@ -1624,30 +1624,17 @@ app.delete("/api/treino-admin/:id", (req, res) => {
 });
 
 
-<<<<<<< HEAD
 // ============ RECUPERA��O DE SENHA ============
 
 // Armazenar c�digos de recupera��o temporariamente (em produ��o usar Redis ou BD)
 const recoveryCodes = new Map();
 
 // Solicitar recupera��o de senha - gera c�digo de 6 d�gitos
-=======
-// ============ RECUPERA��O DE SENHA ============
-
-// Armazenar c�digos de recupera��o temporariamente (em produ��o usar Redis ou BD)
-const recoveryCodes = new Map();
-
-// Solicitar recupera��o de senha - gera c�digo de 6 d�gitos
->>>>>>> parent of 831b756 (feat: Add objetivo and peso_alvo fields to user registration)
 app.post("/api/recuperar-senha", (req, res) => {
   const { email } = req.body;
 
   if (!email) {
-<<<<<<< HEAD
     return res.status(400).json({ erro: "Email � obrigat�rio." });
-=======
-    return res.status(400).json({ erro: "Email � obrigat�rio." });
->>>>>>> parent of 831b756 (feat: Add objetivo and peso_alvo fields to user registration)
   }
 
   // Verificar se o email existe
@@ -1658,7 +1645,6 @@ app.post("/api/recuperar-senha", (req, res) => {
     }
 
     if (rows.length === 0) {
-<<<<<<< HEAD
       return res.status(404).json({ erro: "Email n�o encontrado." });
     }
 
@@ -1666,22 +1652,12 @@ app.post("/api/recuperar-senha", (req, res) => {
     const code = Math.floor(100000 + Math.random() * 900000).toString();
     
     // Guardar c�digo com expira��o de 15 minutos
-=======
-      return res.status(404).json({ erro: "Email n�o encontrado." });
-    }
-
-    // Gerar c�digo de 6 d�gitos
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
-    
-    // Guardar c�digo com expira��o de 15 minutos
->>>>>>> parent of 831b756 (feat: Add objetivo and peso_alvo fields to user registration)
     recoveryCodes.set(email, {
       code,
       expiresAt: Date.now() + 15 * 60 * 1000,
       userId: rows[0].id_users
     });
 
-<<<<<<< HEAD
     console.log("[RECUPERAR SENHA] C�digo gerado para", email, ":", code);
 
     // Em produ��o, enviar email com o c�digo
@@ -1690,50 +1666,27 @@ app.post("/api/recuperar-senha", (req, res) => {
       sucesso: true, 
       mensagem: "C�digo de recupera��o enviado para o email.",
       // REMOVER EM PRODU��O - apenas para testes
-=======
-    console.log("[RECUPERAR SENHA] C�digo gerado para", email, ":", code);
-
-    // Em produ��o, enviar email com o c�digo
-    // Por agora, retornar sucesso (c�digo aparece no console do servidor)
-    res.json({ 
-      sucesso: true, 
-      mensagem: "C�digo de recupera��o enviado para o email.",
-      // REMOVER EM PRODU��O - apenas para testes
->>>>>>> parent of 831b756 (feat: Add objetivo and peso_alvo fields to user registration)
       codigo_teste: code
     });
   });
 });
 
-<<<<<<< HEAD
 // Verificar c�digo de recupera��o
-=======
-// Verificar c�digo de recupera��o
->>>>>>> parent of 831b756 (feat: Add objetivo and peso_alvo fields to user registration)
 app.post("/api/verificar-codigo", (req, res) => {
   const { email, codigo } = req.body;
 
   if (!email || !codigo) {
-<<<<<<< HEAD
     return res.status(400).json({ erro: "Email e c�digo s�o obrigat�rios." });
-=======
-    return res.status(400).json({ erro: "Email e c�digo s�o obrigat�rios." });
->>>>>>> parent of 831b756 (feat: Add objetivo and peso_alvo fields to user registration)
   }
 
   const recovery = recoveryCodes.get(email);
 
   if (!recovery) {
-<<<<<<< HEAD
     return res.status(400).json({ erro: "Nenhum c�digo de recupera��o encontrado. Solicite um novo." });
-=======
-    return res.status(400).json({ erro: "Nenhum c�digo de recupera��o encontrado. Solicite um novo." });
->>>>>>> parent of 831b756 (feat: Add objetivo and peso_alvo fields to user registration)
   }
 
   if (Date.now() > recovery.expiresAt) {
     recoveryCodes.delete(email);
-<<<<<<< HEAD
     return res.status(400).json({ erro: "C�digo expirado. Solicite um novo." });
   }
 
@@ -1742,16 +1695,6 @@ app.post("/api/verificar-codigo", (req, res) => {
   }
 
   res.json({ sucesso: true, mensagem: "C�digo v�lido." });
-=======
-    return res.status(400).json({ erro: "C�digo expirado. Solicite um novo." });
-  }
-
-  if (recovery.code !== codigo) {
-    return res.status(400).json({ erro: "C�digo inv�lido." });
-  }
-
-  res.json({ sucesso: true, mensagem: "C�digo v�lido." });
->>>>>>> parent of 831b756 (feat: Add objetivo and peso_alvo fields to user registration)
 });
 
 // Redefinir senha
@@ -1759,11 +1702,7 @@ app.post("/api/redefinir-senha", async (req, res) => {
   const { email, codigo, novaSenha } = req.body;
 
   if (!email || !codigo || !novaSenha) {
-<<<<<<< HEAD
     return res.status(400).json({ erro: "Todos os campos s�o obrigat�rios." });
-=======
-    return res.status(400).json({ erro: "Todos os campos s�o obrigat�rios." });
->>>>>>> parent of 831b756 (feat: Add objetivo and peso_alvo fields to user registration)
   }
 
   if (novaSenha.length < 6) {
@@ -1773,28 +1712,16 @@ app.post("/api/redefinir-senha", async (req, res) => {
   const recovery = recoveryCodes.get(email);
 
   if (!recovery) {
-<<<<<<< HEAD
     return res.status(400).json({ erro: "Nenhum c�digo de recupera��o encontrado." });
-=======
-    return res.status(400).json({ erro: "Nenhum c�digo de recupera��o encontrado." });
->>>>>>> parent of 831b756 (feat: Add objetivo and peso_alvo fields to user registration)
   }
 
   if (Date.now() > recovery.expiresAt) {
     recoveryCodes.delete(email);
-<<<<<<< HEAD
     return res.status(400).json({ erro: "C�digo expirado. Solicite um novo." });
   }
 
   if (recovery.code !== codigo) {
     return res.status(400).json({ erro: "C�digo inv�lido." });
-=======
-    return res.status(400).json({ erro: "C�digo expirado. Solicite um novo." });
-  }
-
-  if (recovery.code !== codigo) {
-    return res.status(400).json({ erro: "C�digo inv�lido." });
->>>>>>> parent of 831b756 (feat: Add objetivo and peso_alvo fields to user registration)
   }
 
   try {
@@ -1808,11 +1735,7 @@ app.post("/api/redefinir-senha", async (req, res) => {
         return res.status(500).json({ erro: "Erro ao atualizar senha." });
       }
 
-<<<<<<< HEAD
       // Remover c�digo usado
-=======
-      // Remover c�digo usado
->>>>>>> parent of 831b756 (feat: Add objetivo and peso_alvo fields to user registration)
       recoveryCodes.delete(email);
 
       console.log("[RECUPERAR SENHA] Senha alterada com sucesso para:", email);
@@ -1825,39 +1748,6 @@ app.post("/api/redefinir-senha", async (req, res) => {
 });
 
 app.listen(5000, () => console.log("Servidor a correr na porta 5000"));
-<<<<<<< HEAD
-
-  const sql = 'INSERT INTO treino (nome, id_users, data_treino) VALUES (?, ?, CURDATE())';
-  db.query(sql, [nome, usuario_id], (err, result) => {
-    if (err) {
-      console.error('Erro ao criar treino:', err);
-      return res.status(500).json({
-        sucesso: false,
-        erro: 'Erro ao criar treino'
-      });
-    }
-
-    res.json({
-      sucesso: true,
-      treino_id: result.insertId,
-      mensagem: 'Treino criado com sucesso'
-    });
-  });
-});
-
-// 2. ADICIONAR EXERCÃCIOS AO TREINO DO USER
-app.post('/api/treino-user/:treino_id/exercicios', (req, res) => {
-  const { treino_id } = req.params;
-  const { exercises } = req.body;
-
-  if (!Array.isArray(exercises) || exercises.length === 0) {
-    return res.status(400).json({
-      sucesso: false,
-      erro: 'Array de exercÃ­cios Ã© obrigatÃ³rio'
-    });
-  }
-=======
->>>>>>> parent of 831b756 (feat: Add objetivo and peso_alvo fields to user registration)
 
   let adicionados = 0;
   let erros = 0;
