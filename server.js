@@ -1832,10 +1832,333 @@ app.post("/api/redefinir-senha", async (req, res) => {
   }
 });
 
+// ============================================
+// INTEGRAÇÃO ExerciseDB API
+// ============================================
+// POST /api/treino-admin/:workoutId/exercicios
+// Adiciona exercícios importados da API a um treino admin
+
+app.post("/api/treino-admin/:workoutId/exercicios", (req, res) => {
+  const { workoutId } = req.params;
+  const { exercicios } = req.body;
+
+  // Validação
+  if (!workoutId) {
+    return res.status(400).json({
+      sucesso: false,
+      erro: "ID do treino inválido"
+    });
+  }
+
+  if (!exercicios || !Array.isArray(exercicios) || exercicios.length === 0) {
+    return res.status(400).json({
+      sucesso: false,
+      erro: "Nenhum exercício fornecido"
+    });
+  }
+
+  let exerciciosAdicionados = 0;
+  let erroTotal = 0;
+  const totalExercicios = exercicios.length;
+
+  // Processar cada exercício
+  exercicios.forEach((exercicio) => {
+    const { api_id } = exercicio;
+
+    if (!api_id) {
+      erroTotal++;
+      if (exerciciosAdicionados + erroTotal === totalExercicios) {
+        finalizarResposta();
+      }
+      return;
+    }
+
+    // 1. Verificar se exercício já existe na BD
+    db.query(
+      "SELECT id_exercicio FROM exercicios WHERE api_id = ?",
+      [api_id],
+      (err, rows) => {
+        if (err) {
+          console.error("Erro ao verificar exercício:", err);
+          erroTotal++;
+          if (exerciciosAdicionados + erroTotal === totalExercicios) {
+            finalizarResposta();
+          }
+          return;
+        }
+
+        if (rows && rows.length > 0) {
+          // Exercício já existe
+          const exercicioId = rows[0].id_exercicio;
+          inserirRelacionamento(exercicioId);
+        } else {
+          // Exercício não existe, buscar da API
+          fetch(
+            `https://exercisedb.p.rapidapi.com/exercises/exercise/${api_id}`,
+            {
+              headers: {
+                "X-RapidAPI-Key": "ff97ec0ad2msh9eebf08a87e7d43p15e587jsnf5ab68ca1f4c",
+                "X-RapidAPI-Host": "exercisedb.p.rapidapi.com"
+              }
+            }
+          )
+            .then(res => res.json())
+            .then(apiData => {
+              if (!apiData || !apiData.name) {
+                console.warn(`Exercício ${api_id} não encontrado na API`);
+                erroTotal++;
+                if (exerciciosAdicionados + erroTotal === totalExercicios) {
+                  finalizarResposta();
+                }
+                return;
+              }
+
+              // Inserir exercício na BD
+              const sqlInsert = `
+                INSERT INTO exercicios 
+                (nome, descricao, grupo_tipo, sub_tipo, video, api_id, origem, atualizado_em)
+                VALUES (?, ?, ?, ?, ?, ?, 'api', NOW())
+              `;
+
+              db.query(
+                sqlInsert,
+                [
+                  apiData.name,
+                  apiData.target,
+                  apiData.bodyPart,
+                  apiData.target,
+                  apiData.gifUrl,
+                  api_id
+                ],
+                (err, result) => {
+                  if (err) {
+                    console.error("Erro ao inserir exercício:", err);
+                    erroTotal++;
+                    if (exerciciosAdicionados + erroTotal === totalExercicios) {
+                      finalizarResposta();
+                    }
+                    return;
+                  }
+
+                  const exercicioId = result.insertId;
+                  inserirRelacionamento(exercicioId);
+                }
+              );
+            })
+            .catch(apiError => {
+              console.error("Erro ao buscar exercício da API:", apiError);
+              erroTotal++;
+              if (exerciciosAdicionados + erroTotal === totalExercicios) {
+                finalizarResposta();
+              }
+            });
+        }
+
+        // Função auxiliar para inserir relacionamento
+        function inserirRelacionamento(exId) {
+          const sqlRelacao = `
+            INSERT INTO treino_admin_exercicio (id_treino_admin, id_exercicio)
+            VALUES (?, ?)
+          `;
+
+          db.query(sqlRelacao, [workoutId, exId], (err) => {
+            if (err) {
+              console.error("Erro ao inserir relacionamento:", err);
+              erroTotal++;
+            } else {
+              exerciciosAdicionados++;
+            }
+
+            if (exerciciosAdicionados + erroTotal === totalExercicios) {
+              finalizarResposta();
+            }
+          });
+        }
+      }
+    );
+  });
+
+  // Função para enviar resposta final
+  function finalizarResposta() {
+    if (erroTotal > 0 && exerciciosAdicionados === 0) {
+      return res.status(500).json({
+        sucesso: false,
+        erro: "Erro ao adicionar exercícios"
+      });
+    }
+
+    res.json({
+      sucesso: true,
+      mensagem: `${exerciciosAdicionados} exercício(s) adicionado(s) com sucesso`,
+      exerciciosAdicionados: exerciciosAdicionados
+    });
+  }
+});
+
 app.listen(5000, "0.0.0.0", () => console.log("Servidor a correr na porta 5000"));
 
 
+// ============================================
+// USER WORKOUTS - Treinos Pessoais do User
+// ============================================
 
+// 1. CRIAR TREINO DO USER
+app.post('/api/treino-user', (req, res) => {
+  const { usuario_id, nome } = req.body;
 
+  if (!usuario_id || !nome) {
+    return res.status(400).json({
+      sucesso: false,
+      erro: 'usuario_id e nome sÃ£o obrigatÃ³rios'
+    });
+  }
 
+  const sql = 'INSERT INTO treino (nome, id_users, data_treino) VALUES (?, ?, CURDATE())';
+  db.query(sql, [nome, usuario_id], (err, result) => {
+    if (err) {
+      console.error('Erro ao criar treino:', err);
+      return res.status(500).json({
+        sucesso: false,
+        erro: 'Erro ao criar treino'
+      });
+    }
+
+    res.json({
+      sucesso: true,
+      treino_id: result.insertId,
+      mensagem: 'Treino criado com sucesso'
+    });
+  });
+});
+
+// 2. ADICIONAR EXERCÃCIOS AO TREINO DO USER
+app.post('/api/treino-user/:treino_id/exercicios', (req, res) => {
+  const { treino_id } = req.params;
+  const { exercises } = req.body;
+
+  if (!Array.isArray(exercises) || exercises.length === 0) {
+    return res.status(400).json({
+      sucesso: false,
+      erro: 'Array de exercÃ­cios Ã© obrigatÃ³rio'
+    });
+  }
+
+  let adicionados = 0;
+  let erros = 0;
+  const totalExercicios = exercises.length;
+
+  exercises.forEach((exercise) => {
+    // Verificar se exercÃ­cio jÃ¡ existe
+    const sqlCheck = 'SELECT id_exercicio FROM exercicios WHERE api_id = ?';
+    db.query(sqlCheck, [exercise.api_id], (err, rows) => {
+      if (err) {
+        console.error('Erro ao verificar exercÃ­cio:', err);
+        erros++;
+        if (adicionados + erros === totalExercicios) finalizarAdicao();
+        return;
+      }
+
+      if (rows.length > 0) {
+        // ExercÃ­cio jÃ¡ existe
+        const exercicio_id = rows[0].id_exercicio;
+        adicionarAoTreino(exercicio_id);
+      } else {
+        // Inserir novo exercÃ­cio
+        const descricao = 'Alvo: ' + exercise.target + '. Equipamento: ' + exercise.equipment;
+        const sqlInsert = 'INSERT INTO exercicios (nome, descricao, grupo_tipo, sub_tipo, api_id, origem, atualizado_em) VALUES (?, ?, ?, ?, ?, "api", NOW())';
+        
+        db.query(sqlInsert, [
+          exercise.name,
+          descricao,
+          exercise.bodyPart,
+          exercise.target,
+          exercise.api_id
+        ], (err, result) => {
+          if (err) {
+            console.error('Erro ao inserir exercÃ­cio:', err);
+            erros++;
+            if (adicionados + erros === totalExercicios) finalizarAdicao();
+            return;
+          }
+          
+          adicionarAoTreino(result.insertId);
+        });
+      }
+
+      function adicionarAoTreino(exId) {
+        const sqlRelacao = 'INSERT INTO treino_exercicio (id_treino, id_exercicio) VALUES (?, ?)';
+        db.query(sqlRelacao, [treino_id, exId], (err) => {
+          if (err) {
+            console.error('Erro ao adicionar ao treino:', err);
+            erros++;
+          } else {
+            adicionados++;
+          }
+          
+          if (adicionados + erros === totalExercicios) finalizarAdicao();
+        });
+      }
+    });
+  });
+
+  function finalizarAdicao() {
+    if (adicionados === 0) {
+      return res.status(400).json({
+        sucesso: false,
+        erro: 'Nenhum exercÃ­cio foi adicionado'
+      });
+    }
+
+    res.json({
+      sucesso: true,
+      exerciciosAdicionados: adicionados,
+      mensagem: adicionados + ' exercÃ­cio(s) adicionado(s) com sucesso'
+    });
+  }
+});
+
+// 3. OBTER EXERCÃCIOS DE UM TREINO DO USER
+app.get('/api/treino-user/:treino_id/exercicios', (req, res) => {
+  const { treino_id } = req.params;
+
+  const sql = 'SELECT e.id_exercicio, e.nome, e.descricao, e.grupo_tipo, e.sub_tipo, e.api_id, e.origem FROM treino_exercicio te JOIN exercicios e ON te.id_exercicio = e.id_exercicio WHERE te.id_treino = ?';
+
+  db.query(sql, [treino_id], (err, rows) => {
+    if (err) {
+      console.error('Erro ao obter exercÃ­cios:', err);
+      return res.status(500).json({
+        sucesso: false,
+        erro: 'Erro ao obter exercÃ­cios'
+      });
+    }
+
+    res.json({
+      sucesso: true,
+      exercicios: rows || []
+    });
+  });
+});
+
+// 4. REMOVER EXERCÃCIO DO TREINO DO USER
+app.delete('/api/treino-user/:treino_id/exercicios/:exercicio_id', (req, res) => {
+  const { treino_id, exercicio_id } = req.params;
+
+  const sql = 'DELETE FROM treino_exercicio WHERE id_treino = ? AND id_exercicio = ?';
+  db.query(sql, [treino_id, exercicio_id], (err) => {
+    if (err) {
+      console.error('Erro ao remover exercÃ­cio:', err);
+      return res.status(500).json({
+        sucesso: false,
+        erro: 'Erro ao remover exercÃ­cio'
+      });
+    }
+
+    res.json({
+      sucesso: true,
+      mensagem: 'ExercÃ­cio removido com sucesso'
+    });
+  });
+});
+
+app.listen(5000, '0.0.0.0', () => console.log('Servidor a correr na porta 5000'));
 
