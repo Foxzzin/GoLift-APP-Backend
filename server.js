@@ -3,12 +3,132 @@ const express = require("express");
 const cors = require("cors");
 const db = require("./db");
 const bcrypt = require("bcrypt");
+const os = require("os");
+const http = require("http");
 
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Middleware para logar todas as requisições
+app.use((req, res, next) => {
+  console.log(`\n📨 [${new Date().toLocaleTimeString()}] ${req.method} ${req.path}`);
+  
+  // Log dos headers importantes
+  if (req.headers.origin) {
+    console.log(`   Origin: ${req.headers.origin}`);
+  }
+  
+  // Log do body se existir (e não for undefined)
+  if (req.body && Object.keys(req.body).length > 0) {
+    console.log(`   Body:`, JSON.stringify(req.body, null, 2));
+  }
+  
+  // Capturar a resposta
+  const originalSend = res.send;
+  res.send = function(data) {
+    console.log(`   Response Status: ${res.statusCode}`);
+    res.send = originalSend;
+    return res.send(data);
+  };
+  
+  next();
+});
+
+// Função para obter o IP local (prefere Wi-Fi, depois Ethernet, depois loopback)
+function getLocalIP() {
+  const interfaces = os.networkInterfaces();
+  let wifiIP = null;
+  let ethernetIP = null;
+  let anyIP = null;
+  
+  console.log("\n📡 Interfaces de rede disponíveis:");
+  
+  for (const name of Object.keys(interfaces)) {
+    for (const iface of interfaces[name]) {
+      if (iface.family === "IPv4" && !iface.internal) {
+        console.log(`   • ${name}: ${iface.address}`);
+        
+        // Preferir Wi-Fi
+        if (name.toLowerCase().includes("wi-fi") || name.toLowerCase().includes("wlan")) {
+          wifiIP = iface.address;
+        }
+        // Depois Ethernet
+        else if (name.toLowerCase().includes("ethernet") || name.toLowerCase().includes("eth")) {
+          ethernetIP = iface.address;
+        }
+        // Qualquer outro
+        else if (!anyIP) {
+          anyIP = iface.address;
+        }
+      }
+    }
+  }
+  
+  // Usar Wi-Fi > Ethernet > Qualquer outro > localhost
+  const selectedIP = wifiIP || ethernetIP || anyIP || "localhost";
+  console.log(`\n✓ IP selecionado (Wi-Fi/Ethernet): ${selectedIP}\n`);
+  
+  return selectedIP;
+}
+
+const SERVER_IP = getLocalIP();
+const SERVER_PORT = 5000;
+
+
+// Rota de health check (para verificar se o servidor está online)
+app.get("/api/health", (req, res) => {
+  res.json({ sucesso: true, mensagem: "Servidor online" });
+});
+
+// Rota de diagnostico - mostra info de conexão
+app.get("/api/debug", (req, res) => {
+  const clientIP = req.ip || req.connection.remoteAddress || "Desconhecido";
+  res.json({
+    sucesso: true,
+    servidor: {
+      ip: SERVER_IP,
+      porta: SERVER_PORT,
+      url: `http://${SERVER_IP}:${SERVER_PORT}`,
+      timestamp: new Date().toISOString()
+    },
+    cliente: {
+      ip: clientIP,
+      userAgent: req.headers["user-agent"] || "Desconhecido",
+      origin: req.headers.origin || "Desconhecido"
+    }
+  });
+});
+
+// Rota para testar bcrypt - DEBUG ONLY
+app.post("/api/test-bcrypt", async (req, res) => {
+  const { password, hash } = req.body;
+  
+  if (!password || !hash) {
+    return res.status(400).json({ erro: "Password e hash são obrigatórios" });
+  }
+  
+  try {
+    console.log("\n🧪 [TESTE BCRYPT]");
+    console.log(`   Password: ${password}`);
+    console.log(`   Hash: ${hash}`);
+    
+    const match = await bcrypt.compare(password, hash);
+    
+    console.log(`   Resultado: ${match}`);
+    
+    res.json({
+      sucesso: true,
+      password,
+      hash: hash.substring(0, 20) + "...",
+      match
+    });
+  } catch (error) {
+    console.error("❌ Erro no teste bcrypt:", error);
+    res.status(500).json({ erro: error.message });
+  }
+});
 
 // Rota de teste
 app.get("/api/teste", (req, res) => {
@@ -53,8 +173,10 @@ app.get("/api/getTipoUser", (req, res) => {
 app.post("/api/login", (req, res) => {
   const { email, password } = req.body;
 
-  console.log("Mail: " + req.body.email)
-  console.log("Password: " + req.body.password)
+  console.log("\n🔐 [LOGIN] Tentativa de Login");
+  console.log(`   Email: ${email}`);
+  console.log(`   Password recebida: ${password}`);
+  console.log(`   Password length: ${password ? password.length : 0}`);
 
   if (!email || !password) {
     return res.status(400).json({ erro: "Email e password são obrigatórios." });
@@ -64,45 +186,49 @@ app.post("/api/login", (req, res) => {
 
   db.query(sql, [email], async (err, rows) => {
     if (err) {
-      console.log(err);
+      console.error("❌ [LOGIN] Erro na BD:", err);
       return res.status(500).json({ erro: "Erro na base de dados." });
     }
 
     if (rows.length === 0) {
-      return res.status(401).json({ erro: "Credenciais inválidas1." });
+      console.warn(`❌ [LOGIN] Utilizador não encontrado: ${email}`);
+      return res.status(401).json({ erro: "Email não encontrado." });
     }
 
     const user = rows[0];
+    console.log(`✓ [LOGIN] Utilizador encontrado: ${user.userName}`);
+    console.log(`   Password BD (hash): ${user.password}`);
+    console.log(`   Password BD length: ${user.password ? user.password.length : 0}`);
 
     // Verificar password encriptada
-    const passwordCorreta = await bcrypt.compare(password, user.password);
+    try {
+      const passwordCorreta = await bcrypt.compare(password, user.password);
+      
+      console.log(`   bcrypt.compare resultado: ${passwordCorreta}`);
+      
+      if (!passwordCorreta) {
+        console.warn(`❌ [LOGIN] Password incorreta para ${email}`);
+        return res.status(401).json({ erro: "Credenciais inválidas2." });
+      }
 
-    if (!passwordCorreta) {
-      return res.status(401).json({ erro: "Credenciais inválidas2." });
+      console.log(`✅ [LOGIN] Password correta para ${email}`);
+      console.log("[LOGIN] user row from DB:", user);
+      console.log("[LOGIN] user.id_tipoUser:", user.id_tipoUser);
+
+      // Login correcto
+      res.json({
+        sucesso: true,
+        id: user.id_users,
+        nome: user.userName,
+        email: user.email,
+        tipo: user.id_tipoUser
+      });
+    } catch (bcryptError) {
+      console.error("❌ [LOGIN] Erro ao comparar password:", bcryptError);
+      return res.status(500).json({ erro: "Erro ao validar credenciais." });
     }
-
-
-    console.log("[LOGIN] user row from DB:", user);
-    console.log("[LOGIN] user.id_tipoUser:", user.id_tipoUser);
-
-
-    // Login correcto
-    res.json({
-      sucesso: true,
-      id: user.id_users,
-      nome: user.userName,
-      email: user.email,
-      tipo: user.id_tipoUser
-    });
-
-
-    //console.log("User da BD:", user);
-
   });
 });
-
-
-
 
 // Rota de registo
 app.post("/api/register", async (req, res) => {
@@ -164,6 +290,52 @@ app.get("/api/profile/:userId", (req, res) => {
     }
 
     return res.json({ sucesso: true, user: rows[0] });
+  });
+});
+
+// Rota para obter o streak de treinos do utilizador
+app.get("/api/streak/:userId", (req, res) => {
+  const { userId } = req.params;
+
+  const sql = `
+    SELECT 
+      COUNT(DISTINCT DATE(data_inicio)) as totalDays,
+      MAX(data_inicio) as lastWorkoutDate
+    FROM treino_sessao
+    WHERE id_users = ? AND data_inicio IS NOT NULL
+  `;
+
+  db.query(sql, [userId], (err, rows) => {
+    if (err) {
+      console.error("[API] /api/streak SQL error:", err);
+      return res.status(500).json({ erro: "Erro ao obter streak." });
+    }
+
+    if (!rows || rows.length === 0) {
+      return res.json({ 
+        sucesso: true, 
+        streak: 0, 
+        maxStreak: 0, 
+        totalDays: 0 
+      });
+    }
+
+    const result = rows[0];
+    const totalDays = result.totalDays || 0;
+    
+    // Calcular streak: dias consecutivos de treino até hoje
+    // Para simplificar, usamos o número total de dias
+    const streak = totalDays;
+    const maxStreak = totalDays;
+
+    console.log(`[API] /api/streak/${userId} - Total dias: ${totalDays}, Streak: ${streak}`);
+
+    res.json({ 
+      sucesso: true, 
+      streak: streak, 
+      maxStreak: maxStreak, 
+      totalDays: totalDays 
+    });
   });
 });
 
@@ -1424,6 +1596,54 @@ app.get("/api/treino-admin", (req, res) => {
   });
 });
 
+// Alias para /api/treinos-admin (com 's')
+app.get("/api/treinos-admin", (req, res) => {
+  const sql = `
+    SELECT ta.id_treino_admin, ta.nome, ta.criado_em
+    FROM treino_admin ta
+    ORDER BY ta.criado_em DESC
+  `;
+  
+  db.query(sql, (err, treinosRows) => {
+    if (err) {
+      console.error("Erro ao obter treinos de admin:", err);
+      return res.status(500).json({ erro: "Erro ao obter treinos." });
+    }
+
+    if (!treinosRows || treinosRows.length === 0) {
+      return res.json([]);
+    }
+
+    // Para cada treino, obter os exercícios
+    const resultado = [];
+    let processados = 0;
+
+    treinosRows.forEach(treino => {
+      const sqlExercicios = `
+        SELECT te.id_exercicio, te.ordem, e.nome, e.descricao, e.video, e.grupo_tipo, e.sub_tipo
+        FROM treino_admin_exercicio te
+        JOIN exercicios e ON te.id_exercicio = e.id_exercicio
+        WHERE te.id_treino_admin = ?
+        ORDER BY te.ordem ASC
+      `;
+
+      db.query(sqlExercicios, [treino.id_treino_admin], (err, exercicios) => {
+        if (!err) {
+          resultado.push({
+            ...treino,
+            exercicios: exercicios || []
+          });
+        }
+
+        processados++;
+        if (processados === treinosRows.length) {
+          res.json(resultado);
+        }
+      });
+    });
+  });
+});
+
 // GET - Obter detalhes de um treino de admin específico
 app.get("/api/treino-admin/:id", (req, res) => {
   const { id } = req.params;
@@ -1747,81 +1967,6 @@ app.post("/api/redefinir-senha", async (req, res) => {
   }
 });
 
-app.listen(5000, () => console.log("Servidor a correr na porta 5000"));
-
-  let adicionados = 0;
-  let erros = 0;
-  const totalExercicios = exercises.length;
-
-  exercises.forEach((exercise) => {
-    // Verificar se exercÃ­cio jÃ¡ existe
-    const sqlCheck = 'SELECT id_exercicio FROM exercicios WHERE api_id = ?';
-    db.query(sqlCheck, [exercise.api_id], (err, rows) => {
-      if (err) {
-        console.error('Erro ao verificar exercÃ­cio:', err);
-        erros++;
-        if (adicionados + erros === totalExercicios) finalizarAdicao();
-        return;
-      }
-
-      if (rows.length > 0) {
-        // ExercÃ­cio jÃ¡ existe
-        const exercicio_id = rows[0].id_exercicio;
-        adicionarAoTreino(exercicio_id);
-      } else {
-        // Inserir novo exercÃ­cio
-        const descricao = 'Alvo: ' + exercise.target + '. Equipamento: ' + exercise.equipment;
-        const sqlInsert = 'INSERT INTO exercicios (nome, descricao, grupo_tipo, sub_tipo, api_id, origem, atualizado_em) VALUES (?, ?, ?, ?, ?, "api", NOW())';
-        
-        db.query(sqlInsert, [
-          exercise.name,
-          descricao,
-          exercise.bodyPart,
-          exercise.target,
-          exercise.api_id
-        ], (err, result) => {
-          if (err) {
-            console.error('Erro ao inserir exercÃ­cio:', err);
-            erros++;
-            if (adicionados + erros === totalExercicios) finalizarAdicao();
-            return;
-          }
-          
-          adicionarAoTreino(result.insertId);
-        });
-      }
-
-      function adicionarAoTreino(exId) {
-        const sqlRelacao = 'INSERT INTO treino_exercicio (id_treino, id_exercicio) VALUES (?, ?)';
-        db.query(sqlRelacao, [treino_id, exId], (err) => {
-          if (err) {
-            console.error('Erro ao adicionar ao treino:', err);
-            erros++;
-          } else {
-            adicionados++;
-          }
-          
-          if (adicionados + erros === totalExercicios) finalizarAdicao();
-        });
-      }
-    });
-  });
-
-  function finalizarAdicao() {
-    if (adicionados === 0) {
-      return res.status(400).json({
-        sucesso: false,
-        erro: 'Nenhum exercÃ­cio foi adicionado'
-      });
-    }
-
-    res.json({
-      sucesso: true,
-      exerciciosAdicionados: adicionados,
-      mensagem: adicionados + ' exercÃ­cio(s) adicionado(s) com sucesso'
-    });
-  }
-});
 
 // 3. OBTER EXERCÃCIOS DE UM TREINO DO USER
 app.get('/api/treino-user/:treino_id/exercicios', (req, res) => {
@@ -1866,5 +2011,45 @@ app.delete('/api/treino-user/:treino_id/exercicios/:exercicio_id', (req, res) =>
   });
 });
 
-app.listen(5000, '0.0.0.0', () => console.log('Servidor a correr na porta 5000'));
+// Iniciar servidor com informações de debug
+app.listen(SERVER_PORT, '0.0.0.0', () => {
+  console.log("\n" + "=".repeat(60));
+  console.log("✓ Servidor GoLift iniciado com sucesso!");
+  console.log("=".repeat(60));
+  console.log(`📍 IP Local do Servidor: ${SERVER_IP}`);
+  console.log(`🔌 Porta: ${SERVER_PORT}`);
+  console.log(`🌐 URL Local: http://${SERVER_IP}:${SERVER_PORT}`);
+  console.log(`🔗 Localhost: http://localhost:${SERVER_PORT}`);
+  console.log("=".repeat(60));
+  
+  // Fazer um request de teste após 1 segundo para confirmar que está funcionando
+  setTimeout(() => {
+    const testUrl = `http://localhost:${SERVER_PORT}/api/health`;
+    
+    console.log("\n🧪 Fazendo request de teste...");
+    console.log(`📤 GET ${testUrl}`);
+    
+    http.get(testUrl, (res) => {
+      let data = '';
+      
+      res.on('data', (chunk) => {
+        data += chunk;
+      });
+      
+      res.on('end', () => {
+        try {
+          const jsonResponse = JSON.parse(data);
+          console.log(`✅ Resposta recebida:`);
+          console.log(`   Status: ${res.statusCode}`);
+          console.log(`   Dados: ${JSON.stringify(jsonResponse, null, 2)}`);
+          console.log("\n✓ Servidor está funcionando corretamente!\n");
+        } catch (e) {
+          console.log(`⚠️ Erro ao parsear resposta: ${e.message}`);
+        }
+      });
+    }).on('error', (err) => {
+      console.log(`❌ Erro no request de teste: ${err.message}`);
+    });
+  }, 1000);
+});
 
