@@ -11,6 +11,18 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Middleware adicional para garantir CORS em todas as respostas
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
+  if (req.method === 'OPTIONS') {
+    res.sendStatus(200);
+  } else {
+    next();
+  }
+});
+
 // Middleware para logar todas as requisições
 app.use((req, res, next) => {
   next();
@@ -2100,37 +2112,298 @@ app.delete('/api/treino-user/:treino_id/exercicios/:exercicio_id', (req, res) =>
   });
 });
 
-// Iniciar servidor com informações de debug
-app.listen(SERVER_PORT, '0.0.0.0', () => {
-  console.log("\n" + "=".repeat(60));
-  console.log("✓ Servidor GoLift iniciado com sucesso!");
-  console.log("=".repeat(60));
-  console.log(`📍 IP Local do Servidor: ${SERVER_IP}`);
-  console.log(`🔌 Porta: ${SERVER_PORT}`);
-  console.log(`🌐 URL Local: http://${SERVER_IP}:${SERVER_PORT}`);
-  console.log(`🔗 Localhost: http://localhost:${SERVER_PORT}`);
-  console.log("=".repeat(60));
-  
-  // Fazer um request de teste após 1 segundo para confirmar que está funcionando
-  setTimeout(() => {
-    const testUrl = `http://localhost:${SERVER_PORT}/api/health`;
-    
-    http.get(testUrl, (res) => {
-      let data = '';
-      
-      res.on('data', (chunk) => {
-        data += chunk;
-      });
-      
-      res.on('end', () => {
-        try {
-          JSON.parse(data);
-        } catch (e) {
-          console.error(`⚠️ Erro ao parsear resposta: ${e.message}`);
-        }
-      });
-    }).on('error', (err) => {
-      console.error(`❌ Erro no request de teste: ${err.message}`);
+// ============================================
+// ENDPOINTS DE COMUNIDADES
+// ============================================
+
+// GET - Listar todas as comunidades verificadas
+app.get("/api/comunidades", (req, res) => {
+  const query = `
+    SELECT c.id, c.nome, c.descricao, c.criador_id, 
+           u.userName as criador_nome, c.verificada, c.criada_em,
+           COUNT(DISTINCT cm.user_id) as membros
+    FROM comunidades c
+    LEFT JOIN users u ON c.criador_id = u.id_users
+    LEFT JOIN comunidade_membros cm ON c.id = cm.comunidade_id
+    WHERE c.verificada = 1
+    GROUP BY c.id
+    ORDER BY c.criada_em DESC
+  `;
+
+  db.query(query, (err, results) => {
+    if (err) {
+      // Se a tabela não existe, retornar array vazio em vez de erro
+      if (err.code === 'ER_NO_SUCH_TABLE') {
+        console.warn("⚠️  Tabela comunidades não existe ainda");
+        return res.json([]);
+      }
+      console.error("❌ Erro ao listar comunidades:", err);
+      return res.status(500).json({ erro: "Erro ao listar comunidades" });
+    }
+    res.json(results || []);
+  });
+});
+
+// GET - Comunidades do utilizador
+app.get("/api/comunidades/user/:userId", (req, res) => {
+  const userId = req.params.userId;
+
+  const query = `
+    SELECT c.id, c.nome, c.descricao, c.criador_id,
+           u.userName as criador_nome, c.verificada, c.criada_em,
+           COUNT(DISTINCT cm.user_id) as membros
+    FROM comunidades c
+    LEFT JOIN users u ON c.criador_id = u.id_users
+    LEFT JOIN comunidade_membros cm ON c.id = cm.comunidade_id
+    WHERE c.id IN (
+      SELECT comunidade_id FROM comunidade_membros WHERE user_id = ?
+    )
+    GROUP BY c.id
+    ORDER BY c.criada_em DESC
+  `;
+
+  db.query(query, [userId], (err, results) => {
+    if (err) {
+      // Se a tabela não existe, retornar array vazio
+      if (err.code === 'ER_NO_SUCH_TABLE') {
+        return res.json([]);
+      }
+      console.error("❌ Erro ao obter comunidades do utilizador:", err);
+      return res.status(500).json({ erro: "Erro ao obter comunidades" });
+    }
+    res.json(results || []);
+  });
+});
+
+// POST - Criar comunidade
+app.post("/api/comunidades", (req, res) => {
+  const { nome, descricao, criador_id, imagem_url, pais, linguas, categoria, privada } = req.body;
+
+  if (!nome || !descricao || !criador_id) {
+    return res.status(400).json({ erro: "Nome, descrição e criador_id são obrigatórios" });
+  }
+
+  const query = `
+    INSERT INTO comunidades (nome, descricao, criador_id, imagem_url, pais, linguas, categoria, privada, verificada) 
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
+  `;
+
+  const values = [
+    nome,
+    descricao,
+    criador_id,
+    imagem_url || null,
+    pais || null,
+    linguas || null,
+    categoria || "Geral",
+    privada ? 1 : 0
+  ];
+
+  db.query(query, values, (err, result) => {
+    if (err) {
+      console.error("❌ Erro ao criar comunidade:", err);
+      return res.status(500).json({ erro: "Erro ao criar comunidade" });
+    }
+
+    // Adicionar criador como membro
+    const memberQuery = "INSERT INTO comunidade_membros (comunidade_id, user_id) VALUES (?, ?)";
+    db.query(memberQuery, [result.insertId, criador_id], (memberErr) => {
+      if (memberErr) {
+        console.error("❌ Erro ao adicionar criador como membro:", memberErr);
+      }
     });
-  }, 1000);
+
+    res.status(201).json({
+      id: result.insertId,
+      nome,
+      descricao,
+      criador_id,
+      imagem_url: imagem_url || null,
+      pais: pais || null,
+      linguas: linguas || null,
+      categoria: categoria || "Geral",
+      privada: privada ? 1 : 0,
+      verificada: 0,
+      criada_em: new Date().toISOString(),
+      membros: 1
+    });
+  });
+});
+
+// POST - Entrar numa comunidade
+app.post("/api/comunidades/:id/join", (req, res) => {
+  const comunidadeId = req.params.id;
+  const { userId } = req.body;
+
+  if (!userId) {
+    return res.status(400).json({ erro: "userId é obrigatório" });
+  }
+
+  const query = "INSERT INTO comunidade_membros (comunidade_id, user_id) VALUES (?, ?)";
+
+  db.query(query, [comunidadeId, userId], (err) => {
+    if (err) {
+      if (err.code === "ER_DUP_ENTRY") {
+        return res.status(409).json({ erro: "Utilizador já é membro desta comunidade" });
+      }
+      console.error("❌ Erro ao entrar na comunidade:", err);
+      return res.status(500).json({ erro: "Erro ao entrar na comunidade" });
+    }
+    res.json({ sucesso: true, mensagem: "Entrou na comunidade com sucesso" });
+  });
+});
+
+// POST - Sair de uma comunidade
+app.post("/api/comunidades/:id/leave", (req, res) => {
+  const comunidadeId = req.params.id;
+  const { userId } = req.body;
+
+  if (!userId) {
+    return res.status(400).json({ erro: "userId é obrigatório" });
+  }
+
+  const query = "DELETE FROM comunidade_membros WHERE comunidade_id = ? AND user_id = ?";
+
+  db.query(query, [comunidadeId, userId], (err) => {
+    if (err) {
+      console.error("❌ Erro ao sair da comunidade:", err);
+      return res.status(500).json({ erro: "Erro ao sair da comunidade" });
+    }
+    res.json({ sucesso: true, mensagem: "Saiu da comunidade com sucesso" });
+  });
+});
+
+// GET - Obter mensagens de uma comunidade
+app.get("/api/comunidades/:id/mensagens", (req, res) => {
+  const comunidadeId = req.params.id;
+
+  const query = `
+    SELECT cm.id, cm.comunidade_id, cm.user_id, 
+           u.userName as user_nome, cm.mensagem, cm.criada_em
+    FROM comunidade_mensagens cm
+    LEFT JOIN users u ON cm.user_id = u.id_users
+    WHERE cm.comunidade_id = ?
+    ORDER BY cm.criada_em ASC
+  `;
+
+  db.query(query, [comunidadeId], (err, results) => {
+    if (err) {
+      console.error("❌ Erro ao obter mensagens:", err);
+      return res.status(500).json({ erro: "Erro ao obter mensagens" });
+    }
+    res.json(results || []);
+  });
+});
+
+// POST - Enviar mensagem
+app.post("/api/comunidades/:id/mensagens", (req, res) => {
+  const comunidadeId = req.params.id;
+  const { userId, mensagem } = req.body;
+
+  if (!userId || !mensagem) {
+    return res.status(400).json({ erro: "userId e mensagem são obrigatórios" });
+  }
+
+  const query = "INSERT INTO comunidade_mensagens (comunidade_id, user_id, mensagem) VALUES (?, ?, ?)";
+
+  db.query(query, [comunidadeId, userId, mensagem], (err, result) => {
+    if (err) {
+      console.error("❌ Erro ao enviar mensagem:", err);
+      return res.status(500).json({ erro: "Erro ao enviar mensagem" });
+    }
+
+    // Obter nome do utilizador
+    const userQuery = "SELECT userName FROM users WHERE id_users = ?";
+    db.query(userQuery, [userId], (userErr, userResults) => {
+      const userName = userResults && userResults[0] ? userResults[0].userName : "Utilizador";
+
+      res.status(201).json({
+        id: result.insertId,
+        comunidade_id: comunidadeId,
+        user_id: userId,
+        user_nome: userName,
+        mensagem,
+        criada_em: new Date().toISOString()
+      });
+    });
+  });
+});
+
+// GET - Obter membros de uma comunidade
+app.get("/api/comunidades/:id/membros", (req, res) => {
+  const comunidadeId = req.params.id;
+
+  const query = `
+    SELECT cm.id, cm.comunidade_id, cm.user_id,
+           u.userName as user_nome, cm.juntou_em
+    FROM comunidade_membros cm
+    LEFT JOIN users u ON cm.user_id = u.id_users
+    WHERE cm.comunidade_id = ?
+    ORDER BY cm.juntou_em ASC
+  `;
+
+  db.query(query, [comunidadeId], (err, results) => {
+    if (err) {
+      console.error("❌ Erro ao obter membros:", err);
+      return res.status(500).json({ erro: "Erro ao obter membros" });
+    }
+    res.json(results || []);
+  });
+});
+
+// ADMIN ENDPOINTS
+
+// GET - Todas as comunidades com contagem de membros
+app.get("/api/admin/comunidades", (req, res) => {
+  const query = `
+    SELECT c.id, c.nome, c.descricao, c.criador_id,
+           u.userName as criador_nome, c.verificada, c.criada_em,
+           COUNT(DISTINCT cm.user_id) as membros
+    FROM comunidades c
+    LEFT JOIN users u ON c.criador_id = u.id_users
+    LEFT JOIN comunidade_membros cm ON c.id = cm.comunidade_id
+    GROUP BY c.id
+    ORDER BY c.criada_em DESC
+  `;
+
+  db.query(query, (err, results) => {
+    if (err) {
+      console.error("❌ Erro ao obter comunidades:", err);
+      return res.status(500).json({ erro: "Erro ao obter comunidades" });
+    }
+    res.json(results || []);
+  });
+});
+
+// PUT - Toggle verificação de comunidade
+app.put("/api/admin/comunidades/:id/verificacao", (req, res) => {
+  const comunidadeId = req.params.id;
+  const { verificada } = req.body;
+
+  const query = "UPDATE comunidades SET verificada = ? WHERE id = ?";
+
+  db.query(query, [verificada ? 1 : 0, comunidadeId], (err) => {
+    if (err) {
+      console.error("❌ Erro ao atualizar verificação:", err);
+      return res.status(500).json({ erro: "Erro ao atualizar comunidade" });
+    }
+    res.json({ sucesso: true, verificada, mensagem: verificada ? "Comunidade verificada" : "Verificação removida" });
+  });
+});
+
+// Iniciar servidor
+app.listen(SERVER_PORT, () => {
+  console.log(`✓ Servidor a escutar na porta ${SERVER_PORT}`);
+});
+
+// Capturar erros não tratados
+process.on('uncaughtException', (err) => {
+  console.error('❌ ERRO NÃO TRATADO:', err.message);
+  console.error(err.stack);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (err) => {
+  console.error('❌ REJEIÇÃO NÃO TRATADA:', err);
+  process.exit(1);
 });
