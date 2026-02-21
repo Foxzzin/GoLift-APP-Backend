@@ -546,6 +546,48 @@ app.get("/api/exercicios", (req, res) => {
   });
 });
 
+// Copy a shared workout template (creates active workout with exercises directly)
+app.post("/api/treino/copiar", (req, res) => {
+  const { userId, nome, exercicios } = req.body; // exercicios: number[]
+
+  if (!userId || !nome || !Array.isArray(exercicios) || exercicios.length === 0) {
+    return res.status(400).json({ erro: "userId, nome e exercícios são obrigatórios." });
+  }
+
+  db.query("SELECT id_users FROM users WHERE id_users = ?", [userId], (err, userRows) => {
+    if (err) return res.status(500).json({ erro: "Erro na base de dados." });
+    if (userRows.length === 0) return res.status(404).json({ erro: "Utilizador não encontrado." });
+
+    db.query("SELECT COALESCE(MAX(id_treino), 0) + 1 as nextId FROM treino", (err, idRows) => {
+      if (err) return res.status(500).json({ erro: "Erro ao obter ID." });
+
+      const newTreinoId = idRows[0].nextId;
+      const dataTreino = new Date().toISOString().split("T")[0];
+
+      db.query(
+        "INSERT INTO treino (id_treino, id_users, nome, data_treino, status) VALUES (?, ?, ?, ?, 'active')",
+        [newTreinoId, userId, nome.trim(), dataTreino],
+        (err) => {
+          if (err) return res.status(500).json({ erro: "Erro ao criar treino.", detalhes: err.message });
+
+          const placeholders = exercicios.map(() => "(?, ?)").join(", ");
+          const flatValues = exercicios.flatMap((id) => [newTreinoId, id]);
+
+          db.query(
+            `INSERT INTO treino_exercicio (id_treino, id_exercicio) VALUES ${placeholders}`,
+            flatValues,
+            (err) => {
+              if (err) return res.status(500).json({ erro: "Erro ao inserir exercícios.", detalhes: err.message });
+              console.log(`[API] POST /api/treino/copiar - Treino ${newTreinoId} criado com ${exercicios.length} exercícios`);
+              res.json({ sucesso: true, id_treino: newTreinoId });
+            }
+          );
+        }
+      );
+    });
+  });
+});
+
 // Create a new workout (treino) for a user
 app.post("/api/treino", (req, res) => {
   const { userId, nome, exercicios, dataRealizacao } = req.body;
