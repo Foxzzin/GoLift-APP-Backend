@@ -22,7 +22,91 @@ const emailTransporter = nodemailer.createTransport({
 
 // ================== GEMINI AI ==================
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
-const geminiModel = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+const geminiModel = genAI.getGenerativeModel({ model: "gemini-2.0-flash-lite" });
+
+// Mock fallbacks para quando a quota Gemini está esgotada (desenvolvimento)
+const MOCK_RELATORIO = {
+  avaliacao: "Boa semana de treinos! Mantiveste consistência e isso é o mais importante para atingir os teus objetivos.",
+  equilibrio: "O equilíbrio muscular está razoável, mas podes beneficiar de incluir mais trabalho de costas para contrabalançar o treino de peito.",
+  progressao: "Notou-se uma ligeira progressão nas cargas comparando com semanas anteriores. Continua a aumentar 2.5kg por semana quando possível.",
+  descanso: "Os dias de descanso entre sessões parecem adequados. Lembra-te de dormir pelo menos 7-8 horas para a recuperação muscular.",
+  melhorias: [
+    "Adiciona um exercício de mobilidade antes de cada treino",
+    "Aumenta a ingestão de proteína para apoiar a recuperação muscular",
+    "Regista as cargas em cada série para acompanhar melhor a progressão"
+  ]
+};
+
+const MOCK_PLANO = {
+  descricao: "Programa de hipertrofia baseado em divisão Push/Pull/Legs, ideal para 4 dias por semana com foco em progressão de carga.",
+  split: [
+    {
+      dia: "Segunda-feira",
+      foco: "Peito e Tríceps (Push)",
+      exercicios: [
+        { nome: "Supino plano com barra", series: 4, repeticoes: "8-10", observacao: "Foco na descida controlada" },
+        { nome: "Supino inclinado com halteres", series: 3, repeticoes: "10-12", observacao: "" },
+        { nome: "Crucifixo na polia", series: 3, repeticoes: "12-15", observacao: "Contração máxima no topo" },
+        { nome: "Tríceps na polia (corda)", series: 3, repeticoes: "12-15", observacao: "" },
+        { nome: "Mergulho entre bancos", series: 3, repeticoes: "10-12", observacao: "" }
+      ]
+    },
+    {
+      dia: "Terça-feira",
+      foco: "Costas e Bíceps (Pull)",
+      exercicios: [
+        { nome: "Puxada na polia alta", series: 4, repeticoes: "8-10", observacao: "Peito para fora, omoplatas juntas" },
+        { nome: "Remada curvada com barra", series: 4, repeticoes: "8-10", observacao: "" },
+        { nome: "Remada baixa na polia", series: 3, repeticoes: "10-12", observacao: "" },
+        { nome: "Curl com barra", series: 3, repeticoes: "10-12", observacao: "" },
+        { nome: "Curl martelo com halteres", series: 3, repeticoes: "12-15", observacao: "" }
+      ]
+    },
+    {
+      dia: "Quinta-feira",
+      foco: "Pernas (Quadríceps)",
+      exercicios: [
+        { nome: "Agachamento livre com barra", series: 4, repeticoes: "6-8", observacao: "Profundidade paralela ao chão" },
+        { nome: "Leg press 45°", series: 4, repeticoes: "10-12", observacao: "" },
+        { nome: "Extensão de pernas na máquina", series: 3, repeticoes: "12-15", observacao: "" },
+        { nome: "Afundos com halteres", series: 3, repeticoes: "10 cada perna", observacao: "" },
+        { nome: "Panturrilhas em pé", series: 4, repeticoes: "15-20", observacao: "" }
+      ]
+    },
+    {
+      dia: "Sexta-feira",
+      foco: "Ombros e Posterior da Coxa",
+      exercicios: [
+        { nome: "Desenvolvimento com barra", series: 4, repeticoes: "8-10", observacao: "" },
+        { nome: "Elevação lateral com halteres", series: 4, repeticoes: "12-15", observacao: "Cotovelos ligeiramente dobrados" },
+        { nome: "Pássaro (elevação posterior)", series: 3, repeticoes: "12-15", observacao: "" },
+        { nome: "Peso morto romeno", series: 4, repeticoes: "8-10", observacao: "Barra junto ao corpo" },
+        { nome: "Curl femoral deitado", series: 3, repeticoes: "12-15", observacao: "" }
+      ]
+    }
+  ]
+};
+
+// Wrapper com retry e fallback mock para erros de quota Gemini
+async function geminiGenerate(prompt, retries = 1) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const result = await geminiModel.generateContent(prompt);
+      return result.response.text();
+    } catch (err) {
+      const is429 = err?.message?.includes("429") || err?.message?.includes("Too Many Requests");
+      const quotaZero = err?.message?.includes("limit: 0");
+      if (is429 && !quotaZero && attempt < retries) {
+        const delay = (attempt + 1) * 10000;
+        console.warn(`[Gemini] 429 - aguardar ${delay / 1000}s (tentativa ${attempt + 1}/${retries})`);
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
+      // Se quota = 0 ou esgotou retries, lançar para o caller tratar
+      throw err;
+    }
+  }
+}
 
 // ================== STRIPE ==================
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
@@ -117,11 +201,17 @@ function runMigrations() {
       criado_em DATETIME DEFAULT CURRENT_TIMESTAMP,
       UNIQUE KEY unique_user_month (user_id, mes)
     )`,
+    "ALTER TABLE treino ADD COLUMN is_ia TINYINT(1) NOT NULL DEFAULT 0",
+    `CREATE TABLE IF NOT EXISTS daily_phrases (
+      data DATE NOT NULL PRIMARY KEY,
+      frase TEXT NOT NULL,
+      criada_em DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`,
   ];
   migrations.forEach(sql => {
     db.query(sql, (err) => {
-      if (err && !err.message.toLowerCase().includes("duplicate column")) {
-        // Ignorar erros de coluna já existente silenciosamente
+      if (err && !err.message.toLowerCase().includes("duplicate column") && !err.message.toLowerCase().includes("already exists")) {
+        // Ignorar erros de coluna/tabela já existente silenciosamente
       }
     });
   });
@@ -809,6 +899,7 @@ app.get("/api/treino/:userId", (req, res) => {
       t.id_treino,
       t.nome,
       t.data_treino,
+      t.is_ia,
       COUNT(te.id_exercicio) as num_exercicios,
       GROUP_CONCAT(e.nome SEPARATOR ', ') as exercicios_nomes,
       GROUP_CONCAT(DISTINCT e.grupo_tipo SEPARATOR ', ') as grupo_tipo
@@ -816,7 +907,7 @@ app.get("/api/treino/:userId", (req, res) => {
     LEFT JOIN treino_exercicio te ON t.id_treino = te.id_treino
     LEFT JOIN exercicios e ON te.id_exercicio = e.id_exercicio
     WHERE t.id_users = ?
-    GROUP BY t.id_treino, t.nome, t.data_treino
+    GROUP BY t.id_treino, t.nome, t.data_treino, t.is_ia
     ORDER BY t.data_treino DESC, t.id_treino DESC
   `;
 
@@ -869,6 +960,7 @@ app.get("/api/treino/:userId", (req, res) => {
       id_treino: treino.id_treino,
       nome: treino.nome || `Treino ${treino.id_treino}`, // Nome padrão se não existir
       data_treino: treino.data_treino,
+      is_ia: treino.is_ia || 0,
       num_exercicios: treino.num_exercicios || 0,
       exercicios_nomes: treino.exercicios_nomes || "",
       grupo_tipo: treino.grupo_tipo || null
@@ -2335,7 +2427,8 @@ app.get("/api/ai/report/:userId", limiterAI, async (req, res) => {
   // Verificar plano
   const userRow = await new Promise((resolve) => {
     db.query("SELECT plano, plano_ativo_ate FROM users WHERE id_users = ?", [userId], (err, rows) => {
-      resolve(err || !rows.length ? null : rows[0]);
+      if (err) { console.error("[AI report] DB err:", err.message); return resolve(null); }
+      resolve(rows.length ? rows[0] : null);
     });
   });
   if (!userRow) return res.status(404).json({ erro: "Utilizador não encontrado" });
@@ -2390,7 +2483,7 @@ app.get("/api/ai/report/:userId", limiterAI, async (req, res) => {
 
   const perfil = await new Promise((resolve) => {
     db.query(
-      "SELECT userName, objetivo, peso, altura, idade FROM users WHERE id_users = ?",
+      "SELECT userName, peso, altura, idade FROM users WHERE id_users = ?",
       [userId],
       (err, rows) => resolve(err || !rows.length ? {} : rows[0])
     );
@@ -2435,8 +2528,8 @@ Responde APENAS com JSON válido (sem markdown, sem código blocks) com exatamen
 }`;
 
   try {
-    const result = await geminiModel.generateContent(prompt);
-    const text = result.response.text().trim().replace(/```json\n?|\n?```/g, "");
+    const rawText = await geminiGenerate(prompt);
+    const text = rawText.trim().replace(/```json\n?|\n?```/g, "");
     const relatorio = JSON.parse(text);
 
     // Guardar cache
@@ -2449,6 +2542,16 @@ Responde APENAS com JSON válido (sem markdown, sem código blocks) com exatamen
     res.json({ sucesso: true, relatorio, semana_inicio: semanaInicio, cached: false });
   } catch (err) {
     console.error("[AI] Erro ao gerar relatório:", err.message);
+    const is429 = err?.message?.includes("429");
+    if (is429) {
+      // Fallback mock para desenvolvimento quando quota esgotada
+      console.warn("[AI] A usar relatório mock por quota esgotada");
+      db.query(
+        "INSERT INTO ai_reports (user_id, semana_inicio, conteudo) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE conteudo = VALUES(conteudo)",
+        [userId, semanaInicio, JSON.stringify(MOCK_RELATORIO)]
+      );
+      return res.json({ sucesso: true, relatorio: MOCK_RELATORIO, semana_inicio: semanaInicio, cached: false, mock: true });
+    }
     res.status(500).json({ erro: "Erro ao gerar relatório. Tenta mais tarde." });
   }
 });
@@ -2460,8 +2563,9 @@ app.get("/api/ai/plan/:userId", limiterAI, async (req, res) => {
   const { userId } = req.params;
 
   const userRow = await new Promise((resolve) => {
-    db.query("SELECT plano, plano_ativo_ate, objetivo FROM users WHERE id_users = ?", [userId], (err, rows) => {
-      resolve(err || !rows.length ? null : rows[0]);
+    db.query("SELECT plano, plano_ativo_ate FROM users WHERE id_users = ?", [userId], (err, rows) => {
+      if (err) { console.error("[AI plan GET] DB err:", err.message); return resolve(null); }
+      resolve(rows.length ? rows[0] : null);
     });
   });
   if (!userRow) return res.status(404).json({ erro: "Utilizador não encontrado" });
@@ -2493,8 +2597,9 @@ app.post("/api/ai/plan/:userId/generate", limiterAI, async (req, res) => {
   const { diasPorSemana = 4 } = req.body;
 
   const userRow = await new Promise((resolve) => {
-    db.query("SELECT plano, plano_ativo_ate, objetivo, peso, altura, idade FROM users WHERE id_users = ?", [userId], (err, rows) => {
-      resolve(err || !rows.length ? null : rows[0]);
+    db.query("SELECT plano, plano_ativo_ate, peso, altura, idade FROM users WHERE id_users = ?", [userId], (err, rows) => {
+      if (err) { console.error("[AI plan POST] DB err:", err.message); return resolve(null); }
+      resolve(rows.length ? rows[0] : null);
     });
   });
   if (!userRow) return res.status(404).json({ erro: "Utilizador não encontrado" });
@@ -2534,8 +2639,8 @@ Responde APENAS com JSON válido (sem markdown, sem código blocks) com exatamen
 Inclui apenas os ${diasPorSemana} dias de treino (sem dias de descanso no array).`;
 
   try {
-    const result = await geminiModel.generateContent(prompt);
-    const text = result.response.text().trim().replace(/```json\n?|\n?```/g, "");
+    const rawText = await geminiGenerate(prompt);
+    const text = rawText.trim().replace(/```json\n?|\n?```/g, "");
     const plano = JSON.parse(text);
 
     db.query(
@@ -2549,8 +2654,183 @@ Inclui apenas os ${diasPorSemana} dias de treino (sem dias de descanso no array)
     );
   } catch (err) {
     console.error("[AI] Erro ao gerar plano:", err.message);
+    const is429 = err?.message?.includes("429");
+    if (is429) {
+      // Fallback mock para desenvolvimento quando quota esgotada
+      console.warn("[AI] A usar plano mock por quota esgotada");
+      db.query(
+        "INSERT INTO ai_planos (user_id, mes, conteudo) VALUES (?, ?, ?)",
+        [userId, mesAtual, JSON.stringify(MOCK_PLANO)],
+        (dbErr) => {
+          if (dbErr) console.error("[AI] Erro ao guardar plano mock:", dbErr.message);
+          res.json({ sucesso: true, plano: MOCK_PLANO, mes: mesAtual, pode_gerar: false, mock: true });
+        }
+      );
+      return;
+    }
     res.status(500).json({ erro: "Erro ao gerar plano. Tenta mais tarde." });
   }
+});
+
+// Helper: detectar grupo muscular a partir do nome do exercício (PT)
+function detectarGrupoMuscular(nome) {
+  const n = nome.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const map = [
+    { grupo: "Peito",          sub: "Peito Médio",        kw: ["peito","press de peito","flexao de peito","supino"] },
+    { grupo: "Peito",          sub: "Peito Superior",     kw: ["peito superior","inclinado","incline","upper chest"] },
+    { grupo: "Peito",          sub: "Peito Inferior",     kw: ["peito inferior","declinado","decline"] },
+    { grupo: "Costas",         sub: "Dorsal",             kw: ["puxada","remada","lat pull","pulley","dorsal","grande dorsal"] },
+    { grupo: "Costas",         sub: "Trapézio",           kw: ["trapezio","encolhimento","shrug"] },
+    { grupo: "Costas",         sub: "Rombóide",           kw: ["romboide","face pull","retração"] },
+    { grupo: "Ombros",         sub: "Deltóide Anterior",  kw: ["elevacao frontal","deltoi anterior","front raise"] },
+    { grupo: "Ombros",         sub: "Deltóide Lateral",   kw: ["elevacao lateral","crucifixo invertido","lateral raise"] },
+    { grupo: "Ombros",         sub: "Deltóide Posterior", kw: ["deltoi posterior","bird","reverse fly","posterior"] },
+    { grupo: "Ombros",         sub: "Ombros",             kw: ["ombro","press de ombros","desenvolvimento","military press","press arnold","upright row"] },
+    { grupo: "Bíceps",         sub: "Bíceps",             kw: ["bicep","curl","martelo","rosca"] },
+    { grupo: "Tríceps",        sub: "Tríceps",            kw: ["tricep","extensao","testa","skull","dips","mergulho","push down","kickback"] },
+    { grupo: "Antebraços",     sub: "Antebraços",         kw: ["antebraco","pulso","wrist","grip"] },
+    { grupo: "Quadríceps",     sub: "Quadríceps",         kw: ["quadricep","agachamento","leg press","extensao de pernas","lunges","afundo","hack squat","goblet","sissy"] },
+    { grupo: "Isquiotibiais",  sub: "Isquiotibiais",      kw: ["isquio","peso morto romeno","leg curl","flexao de pernas","deadlift romeno","hamstring"] },
+    { grupo: "Glúteos",        sub: "Glúteos",            kw: ["gluteo","hip thrust","pontes","elevacao de quadril","abducao","kickback glut","donkey"] },
+    { grupo: "Gémeos",         sub: "Gémeos",             kw: ["gemeo","panturrilha","calf","plantarflexao"] },
+    { grupo: "Abdómen",        sub: "Abdómen",            kw: ["abdomen","abdominal","prancha","plank","crunch","sit up","russian twist","rollout","hollow","mountain climber","leg raise","elevacao de pernas"] },
+    { grupo: "Lombar",         sub: "Lombar",             kw: ["lombar","hiperextensao","deadlift","peso morto","superman","bird dog","back extension"] },
+    { grupo: "Full Body",      sub: "Funcional",          kw: ["burpee","clean","snatch","thruster","turkish","kettlebell","kettlebell swing","wall ball","box jump","swing","bear crawl"] },
+    { grupo: "Cardio",         sub: "Cardio",             kw: ["corrida","bicicleta","remo ergometro","passadeira","eliptica","cardio","hiit","salto","corda","spinning","jump rope","step"] },
+  ];
+  for (const entry of map) {
+    for (const kw of entry.kw) {
+      if (n.includes(kw)) return { grupo_tipo: entry.grupo, sub_tipo: entry.sub };
+    }
+  }
+  return { grupo_tipo: "Outros", sub_tipo: "Geral" };
+}
+
+// ================== IMPORT AI PLAN DAY TO WORKOUTS ==================
+app.post("/api/ai/plan/:userId/import-day", (req, res) => {
+  const { userId } = req.params;
+  const { dia, foco, exercicios } = req.body;
+
+  if (!dia || !exercicios || !Array.isArray(exercicios) || exercicios.length === 0) {
+    return res.status(400).json({ erro: "Dados inválidos" });
+  }
+
+  const nomeTreino = `${dia} — ${foco || "IA"}`;
+
+  // Helper: find or create exercise by name
+  const getOrCreateExercicio = (nome, cb) => {
+    db.query("SELECT id_exercicio FROM exercicios WHERE nome = ? LIMIT 1", [nome], (err, rows) => {
+      if (err) return cb(err);
+      if (rows.length > 0) return cb(null, rows[0].id_exercicio);
+      const { grupo_tipo, sub_tipo } = detectarGrupoMuscular(nome);
+      db.query(
+        "INSERT INTO exercicios (nome, grupo_tipo, sub_tipo) VALUES (?, ?, ?)",
+        [nome, grupo_tipo, sub_tipo],
+        (err2, result) => {
+          if (err2) return cb(err2);
+          cb(null, result.insertId);
+        }
+      );
+    });
+  };
+
+  // Get next treino id
+  db.query("SELECT IFNULL(MAX(id_treino), 0) + 1 AS next_id FROM treino", (err, rows) => {
+    if (err) return res.status(500).json({ erro: "Erro DB" });
+    const nextId = rows[0].next_id;
+
+    db.query(
+      "INSERT INTO treino (id_treino, id_users, nome, data_treino, is_ia) VALUES (?, ?, ?, NOW(), 1)",
+      [nextId, userId, nomeTreino],
+      (err2) => {
+        if (err2) return res.status(500).json({ erro: "Erro ao criar treino" });
+
+        // Process exercises sequentially
+        let index = 0;
+        const processNext = () => {
+          if (index >= exercicios.length) {
+            return res.json({ sucesso: true, id_treino: nextId, nome: nomeTreino });
+          }
+          const ex = exercicios[index++];
+          getOrCreateExercicio(ex.nome || ex.exercicio, (err3, idExercicio) => {
+            if (err3) return res.status(500).json({ erro: "Erro ao criar exercício" });
+
+            // Insert treino_exercicio link only — no series inserted
+            db.query(
+              "INSERT INTO treino_exercicio (id_treino, id_exercicio) VALUES (?, ?)",
+              [nextId, idExercicio],
+              (err4) => {
+                if (err4) return res.status(500).json({ erro: "Erro ao associar exercício" });
+                processNext();
+              }
+            );
+          });
+        };
+        processNext();
+      }
+    );
+  });
+});
+
+// ================== DAILY MOTIVATIONAL PHRASE ==================
+app.get("/api/daily-phrase", async (req, res) => {
+  // Check cache
+  db.query("SELECT frase FROM daily_phrases WHERE data = CURDATE()", (err, rows) => {
+    if (!err && rows.length > 0) {
+      return res.json({ frase: rows[0].frase, cached: true });
+    }
+
+    // Generate new phrase
+    const prompt = `Gera uma frase motivacional curta (máximo 120 caracteres) para atletas e praticantes de fitness. A frase deve ser inspiradora, em português de Portugal, e adequada para o início do dia. Responde APENAS com a frase, sem aspas, sem explicação.`;
+
+    geminiGenerate(prompt)
+      .then((text) => {
+        const frase = text.trim().replace(/^["']|["']$/g, "");
+        db.query(
+          "INSERT INTO daily_phrases (data, frase) VALUES (CURDATE(), ?) ON DUPLICATE KEY UPDATE frase = VALUES(frase)",
+          [frase],
+          () => res.json({ frase, cached: false })
+        );
+      })
+      .catch((err2) => {
+        const mockFrases = [
+          "O teu único limite és tu mesmo. Vai mais além.",
+          "Cada treino é um passo rumo à melhor versão de ti.",
+          "A consistência supera a intensidade. Aparece todos os dias.",
+          "Não treinas para ontem. Treinas para o que ainda está por vir.",
+          "Força não é o que consegues fazer. É superar o que pensavas não conseguir."
+        ];
+        const frase = mockFrases[new Date().getDate() % mockFrases.length];
+        db.query(
+          "INSERT INTO daily_phrases (data, frase) VALUES (CURDATE(), ?) ON DUPLICATE KEY UPDATE frase = VALUES(frase)",
+          [frase],
+          () => res.json({ frase, cached: false, mock: true })
+        );
+      });
+  });
+});
+
+// ================== STRIPE BILLING PORTAL ==================
+app.post("/api/stripe/portal", async (req, res) => {
+  const { userId } = req.body;
+  if (!userId) return res.status(400).json({ erro: "userId obrigatório" });
+
+  db.query("SELECT stripe_customer_id FROM users WHERE id_users = ?", [userId], async (err, rows) => {
+    if (err || rows.length === 0) return res.status(404).json({ erro: "Utilizador não encontrado" });
+    const customerId = rows[0].stripe_customer_id;
+    if (!customerId) return res.status(400).json({ erro: "Sem subscrição ativa" });
+
+    try {
+      const session = await stripe.billingPortal.sessions.create({
+        customer: customerId,
+        return_url: "exp://localhost:8081"
+      });
+      res.json({ url: session.url });
+    } catch (e) {
+      console.error("[Stripe Portal]", e.message);
+      res.status(500).json({ erro: "Erro ao criar portal" });
+    }
+  });
 });
 
 // ================== 404 HANDLER ==================
