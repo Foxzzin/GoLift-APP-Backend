@@ -1404,7 +1404,7 @@ app.get("/api/recordes/:userId", (req, res) => {
     SELECT 
       e.nome as nome_exercicio,
       MAX(ts.peso) as peso,
-      ts.data_serie
+      MAX(ts.data_serie) as data_serie
     FROM treino_serie ts
     INNER JOIN treino_sessao sess ON ts.id_sessao = sess.id_sessao
     INNER JOIN exercicios e ON ts.id_exercicio = e.id_exercicio
