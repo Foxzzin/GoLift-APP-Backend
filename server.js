@@ -1,15 +1,223 @@
 // server.js
+require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const db = require("./db");
 const bcrypt = require("bcrypt");
 const os = require("os");
 const http = require("http");
+const nodemailer = require("nodemailer");
+const { GoogleGenerativeAI } = require("@google/generative-ai");
+const Stripe = require("stripe");
+const rateLimit = require("express-rate-limit");
+
+// ================== EMAIL (GMAIL SMTP) ==================
+const emailTransporter = nodemailer.createTransport({
+  service: "gmail",
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_APP_PASS, // App Password do Gmail (não a password normal)
+  },
+});
+
+// ================== GEMINI AI ==================
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
+const geminiModel = genAI.getGenerativeModel({ model: "gemini-2.0-flash-lite" });
+
+// Mock fallbacks para quando a quota Gemini está esgotada (desenvolvimento)
+const MOCK_RELATORIO = {
+  avaliacao: "Boa semana de treinos! Mantiveste consistência e isso é o mais importante para atingir os teus objetivos.",
+  equilibrio: "O equilíbrio muscular está razoável, mas podes beneficiar de incluir mais trabalho de costas para contrabalançar o treino de peito.",
+  progressao: "Notou-se uma ligeira progressão nas cargas comparando com semanas anteriores. Continua a aumentar 2.5kg por semana quando possível.",
+  descanso: "Os dias de descanso entre sessões parecem adequados. Lembra-te de dormir pelo menos 7-8 horas para a recuperação muscular.",
+  melhorias: [
+    "Adiciona um exercício de mobilidade antes de cada treino",
+    "Aumenta a ingestão de proteína para apoiar a recuperação muscular",
+    "Regista as cargas em cada série para acompanhar melhor a progressão"
+  ]
+};
+
+const MOCK_PLANO = {
+  descricao: "Programa de hipertrofia baseado em divisão Push/Pull/Legs, ideal para 4 dias por semana com foco em progressão de carga.",
+  split: [
+    {
+      dia: "Segunda-feira",
+      foco: "Peito e Tríceps (Push)",
+      exercicios: [
+        { nome: "Supino plano com barra", series: 4, repeticoes: "8-10", observacao: "Foco na descida controlada" },
+        { nome: "Supino inclinado com halteres", series: 3, repeticoes: "10-12", observacao: "" },
+        { nome: "Crucifixo na polia", series: 3, repeticoes: "12-15", observacao: "Contração máxima no topo" },
+        { nome: "Tríceps na polia (corda)", series: 3, repeticoes: "12-15", observacao: "" },
+        { nome: "Mergulho entre bancos", series: 3, repeticoes: "10-12", observacao: "" }
+      ]
+    },
+    {
+      dia: "Terça-feira",
+      foco: "Costas e Bíceps (Pull)",
+      exercicios: [
+        { nome: "Puxada na polia alta", series: 4, repeticoes: "8-10", observacao: "Peito para fora, omoplatas juntas" },
+        { nome: "Remada curvada com barra", series: 4, repeticoes: "8-10", observacao: "" },
+        { nome: "Remada baixa na polia", series: 3, repeticoes: "10-12", observacao: "" },
+        { nome: "Curl com barra", series: 3, repeticoes: "10-12", observacao: "" },
+        { nome: "Curl martelo com halteres", series: 3, repeticoes: "12-15", observacao: "" }
+      ]
+    },
+    {
+      dia: "Quinta-feira",
+      foco: "Pernas (Quadríceps)",
+      exercicios: [
+        { nome: "Agachamento livre com barra", series: 4, repeticoes: "6-8", observacao: "Profundidade paralela ao chão" },
+        { nome: "Leg press 45°", series: 4, repeticoes: "10-12", observacao: "" },
+        { nome: "Extensão de pernas na máquina", series: 3, repeticoes: "12-15", observacao: "" },
+        { nome: "Afundos com halteres", series: 3, repeticoes: "10 cada perna", observacao: "" },
+        { nome: "Panturrilhas em pé", series: 4, repeticoes: "15-20", observacao: "" }
+      ]
+    },
+    {
+      dia: "Sexta-feira",
+      foco: "Ombros e Posterior da Coxa",
+      exercicios: [
+        { nome: "Desenvolvimento com barra", series: 4, repeticoes: "8-10", observacao: "" },
+        { nome: "Elevação lateral com halteres", series: 4, repeticoes: "12-15", observacao: "Cotovelos ligeiramente dobrados" },
+        { nome: "Pássaro (elevação posterior)", series: 3, repeticoes: "12-15", observacao: "" },
+        { nome: "Peso morto romeno", series: 4, repeticoes: "8-10", observacao: "Barra junto ao corpo" },
+        { nome: "Curl femoral deitado", series: 3, repeticoes: "12-15", observacao: "" }
+      ]
+    }
+  ]
+};
+
+// Wrapper com retry e fallback mock para erros de quota Gemini
+async function geminiGenerate(prompt, retries = 1) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const result = await geminiModel.generateContent(prompt);
+      return result.response.text();
+    } catch (err) {
+      const is429 = err?.message?.includes("429") || err?.message?.includes("Too Many Requests");
+      const quotaZero = err?.message?.includes("limit: 0");
+      if (is429 && !quotaZero && attempt < retries) {
+        const delay = (attempt + 1) * 10000;
+        console.warn(`[Gemini] 429 - aguardar ${delay / 1000}s (tentativa ${attempt + 1}/${retries})`);
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
+      // Se quota = 0 ou esgotou retries, lançar para o caller tratar
+      throw err;
+    }
+  }
+}
+
+// ================== STRIPE ==================
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
+
+// ================== RESET DE PASSWORD (em memória) ==================
+// Map: email → { code: string, expiry: number }
+const resetCodes = new Map();
 
 
 const app = express();
+
+// ================== STRIPE WEBHOOK (antes do express.json) ==================
+app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async (req, res) => {
+  const sig = req.headers["stripe-signature"];
+  let event;
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+  } catch (err) {
+    console.error("[Stripe] Webhook signature inválida:", err.message);
+    return res.status(400).json({ erro: "Webhook inválido" });
+  }
+
+  if (event.type === "checkout.session.completed") {
+    const session = event.data.object;
+    const userId = session.metadata?.userId;
+    if (userId) {
+      const expiry = new Date();
+      expiry.setMonth(expiry.getMonth() + 1);
+      db.query(
+        "UPDATE users SET plano = 'pago', plano_ativo_ate = ?, stripe_customer_id = ? WHERE id_users = ?",
+        [expiry, session.customer, userId],
+        (err) => {
+          if (err) console.error("[Stripe] Erro ao ativar plano:", err);
+          else console.log(`[Stripe] Plano ativado para user ${userId} até ${expiry.toISOString()}`);
+        }
+      );
+    }
+  }
+
+  if (event.type === "customer.subscription.deleted" || event.type === "invoice.payment_failed") {
+    const obj = event.data.object;
+    const customerId = obj.customer;
+    db.query(
+      "UPDATE users SET plano = 'free', plano_ativo_ate = NULL WHERE stripe_customer_id = ?",
+      [customerId],
+      (err) => { if (err) console.error("[Stripe] Erro ao desativar plano:", err); }
+    );
+  }
+
+  res.json({ received: true });
+});
+
 app.use(cors());
 app.use(express.json());
+
+// ================== RATE LIMITING ==================
+const limiterGeral = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 200,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { erro: "Demasiadas tentativas. Aguarda um momento." },
+});
+const limiterAI = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { erro: "Limite de pedidos à IA atingido. Tenta de novo em 1 hora." },
+});
+app.use("/api/", limiterGeral);
+
+// ================== MIGRAÇÕES DB ==================
+function runMigrations() {
+  const migrations = [
+    "ALTER TABLE users ADD COLUMN plano VARCHAR(10) NOT NULL DEFAULT 'free'",
+    "ALTER TABLE users ADD COLUMN plano_ativo_ate DATETIME NULL",
+    "ALTER TABLE users ADD COLUMN stripe_customer_id VARCHAR(255) NULL",
+    `CREATE TABLE IF NOT EXISTS ai_reports (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      user_id INT NOT NULL,
+      semana_inicio DATE NOT NULL,
+      conteudo TEXT NOT NULL,
+      criado_em DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY unique_user_week (user_id, semana_inicio)
+    )`,
+    `CREATE TABLE IF NOT EXISTS ai_planos (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      user_id INT NOT NULL,
+      mes VARCHAR(7) NOT NULL,
+      conteudo TEXT NOT NULL,
+      criado_em DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY unique_user_month (user_id, mes)
+    )`,
+    "ALTER TABLE treino ADD COLUMN is_ia TINYINT(1) NOT NULL DEFAULT 0",
+    `CREATE TABLE IF NOT EXISTS daily_phrases (
+      data DATE NOT NULL PRIMARY KEY,
+      frase TEXT NOT NULL,
+      criada_em DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`,
+  ];
+  migrations.forEach(sql => {
+    db.query(sql, (err) => {
+      if (err && !err.message.toLowerCase().includes("duplicate column") && !err.message.toLowerCase().includes("already exists")) {
+        // Ignorar erros de coluna/tabela já existente silenciosamente
+      }
+    });
+  });
+  console.log("✓ Migrações de planos/AI verificadas");
+}
+runMigrations();
 
 // Middleware para logar todas as requisições
 app.use((req, res, next) => {
@@ -58,7 +266,7 @@ function getLocalIP() {
 }
 
 const SERVER_IP = getLocalIP();
-const SERVER_PORT = 5000;
+const SERVER_PORT = process.env.PORT || 5000;
 
 
 // Rota para obter informações do servidor (para auto-config no cliente)
@@ -112,116 +320,6 @@ app.get("/api/server-info", (req, res) => {
 app.get("/api/health", (req, res) => {
   res.json({ sucesso: true, mensagem: "Servidor online" });
 });
-
-// Rota de diagnostico - mostra info de conexão
-app.get("/api/debug", (req, res) => {
-  const clientIP = req.ip || req.connection.remoteAddress || "Desconhecido";
-  res.json({
-    sucesso: true,
-    servidor: {
-      ip: SERVER_IP,
-      porta: SERVER_PORT,
-      url: `http://${SERVER_IP}:${SERVER_PORT}`,
-      timestamp: new Date().toISOString(),
-      clientIP: clientIP
-    },
-    cliente: {
-      ip: clientIP,
-      userAgent: req.headers["user-agent"] || "Desconhecido",
-      origin: req.headers.origin || "Desconhecido"
-    }
-  });
-});
-
-// Rota para testar bcrypt - DEBUG ONLY
-app.post("/api/test-bcrypt", async (req, res) => {
-  const { password, hash } = req.body;
-  
-  if (!password || !hash) {
-    return res.status(400).json({ erro: "Password e hash são obrigatórios" });
-  }
-  
-  try {
-    const match = await bcrypt.compare(password, hash);
-    
-    res.json({
-      sucesso: true,
-      password,
-      hash: hash.substring(0, 20) + "...",
-      match
-    });
-  } catch (error) {
-    console.error("❌ Erro no teste bcrypt:", error);
-    res.status(500).json({ erro: error.message });
-  }
-});
-
-// DEBUG: Verificar estrutura de treino_exercicio
-app.get("/api/debug-treino/:treino_id", (req, res) => {
-  const treino_id = req.params.treino_id;
-  
-  const sql = `SELECT 
-    t.id_treino,
-    t.nome,
-    COUNT(te.id_exercicio) as total_exercicios,
-    GROUP_CONCAT(te.id_exercicio) as ids_exercicio,
-    GROUP_CONCAT(e.nome) as nomes_exercicio
-  FROM treino t
-  LEFT JOIN treino_exercicio te ON t.id_treino = te.id_treino
-  LEFT JOIN exercicios e ON te.id_exercicio = e.id_exercicio
-  WHERE t.id_treino = ?
-  GROUP BY t.id_treino`;
-  
-  db.query(sql, [treino_id], (err, rows) => {
-    if (err) {
-      return res.status(500).json({ sucesso: false, erro: err.message });
-    }
-    
-    res.json({
-      sucesso: true,
-      treino: rows[0] || { id_treino: treino_id, total_exercicios: 0, nomes_exercicio: null }
-    });
-  });
-});
-
-// Rota de teste
-app.get("/api/teste", (req, res) => {
-  db.query("SELECT * FROM tipo_user", (err, rows) => {
-    if (err) {
-      console.error(err);
-      return res.status(500).json({ erro: "Erro na base de dados." });
-    }
-
-    res.json({ sucesso: true, resultado: rows[0].resultado });
-  });
-});
-
-//Rota para obter todos os users
-app.get("/api/getUsers", (req, res) => {
-  const sql = "SELECT * FROM users";
-  db.query(sql, (err, rows) => {
-    if (err) {
-      console.error(err);
-      return res.status(500).json({ erro: "Erro ao obter os utilizadores." });
-    }
-    res.json(rows);
-  });
-});
-
-// Rota de Tipo de user
-app.get("/api/getTipoUser", (req, res) => {
-  const sql = "SELECT * FROM tipo_user";
-
-  db.query(sql, (err, rows) => {
-    if (err) {
-      console.error(err);
-      return res.status(500).json({ erro: "Erro ao obter os tipos de utilizador." });
-    }
-
-    res.json(rows);
-  });
-});
-
 
 //Rota de Login
 app.post("/api/login", (req, res) => {
@@ -329,16 +427,16 @@ app.get("/api/profile/:userId", (req, res) => {
 });
 
 // Rota para obter o streak de treinos do utilizador
-// Streak = dias CONSECUTIVOS com treinos válidos (status='completed')
+// Streak = dias CONSECUTIVOS com sessões concluídas (data_fim preenchida)
 app.get("/api/streak/:userId", (req, res) => {
   const { userId } = req.params;
 
-  // Obter datas únicas de treinos válidos (completed), ordenadas DESC
+  // Obter datas únicas de sessões concluídas, ordenadas DESC
   const sql = `
     SELECT DISTINCT DATE(ts.data_fim) as data_treino
-    FROM treino t
-    INNER JOIN treino_sessao ts ON t.id_treino = ts.id_treino
-    WHERE t.id_users = ? AND t.status = 'completed' AND ts.data_fim IS NOT NULL
+    FROM treino_sessao ts
+    INNER JOIN treino t ON ts.id_treino = t.id_treino
+    WHERE t.id_users = ? AND ts.data_fim IS NOT NULL
     ORDER BY data_treino DESC
   `;
 
@@ -384,67 +482,6 @@ app.get("/api/streak/:userId", (req, res) => {
     });
   });
 });
-
-// Rota para obter o último treino do utilizador
-app.get("/api/lastWorkout/:userId", (req, res) => {
-  const { userId } = req.params;
-
-  const sql = `
-    SELECT 
-      t.id_treino,
-      'Treino' as name,
-      t.data_treino as date,
-      COUNT(te.id_exercicio) as exercises
-    FROM treino t
-    LEFT JOIN treino_exercicio te ON t.id_treino = te.id_treino
-    WHERE t.id_users = ?
-    GROUP BY t.id_treino, t.data_treino
-    ORDER BY t.data_treino DESC 
-    LIMIT 1
-  `;
-
-  db.query(sql, [userId], (err, rows) => {
-    if (err) {
-      console.error(err);
-      return res.status(500).json({ erro: "Erro ao obter último treino." });
-    }
-
-    if (rows.length === 0) {
-      return res.json({ sucesso: true, lastWorkout: null });
-    }
-
-    res.json({ sucesso: true, lastWorkout: rows[0] });
-  });
-});
-
-// Rota para obter recordes pessoais do utilizador (Top 3 exercícios com mais peso)
-app.get("/api/records/:userId", (req, res) => {
-  const { userId } = req.params;
-
-  const sql = `
-    SELECT 
-      e.nome as exercise,
-      MAX(e.recorde_pessoal) as weight,
-      'N/A' as reps
-    FROM exercicios e
-    INNER JOIN treino_exercicio te ON e.id_exercicio = te.id_exercicio
-    INNER JOIN treino t ON te.id_treino = t.id_treino
-    WHERE t.id_users = ? AND e.recorde_pessoal IS NOT NULL
-    GROUP BY e.id_exercicio, e.nome
-    ORDER BY weight DESC 
-    LIMIT 3
-  `;
-
-  db.query(sql, [userId], (err, rows) => {
-    if (err) {
-      console.error(err);
-      return res.status(500).json({ erro: "Erro ao obter recordes." });
-    }
-
-    res.json({ sucesso: true, records: rows });
-  });
-});
-
 
 // ---------- Admin API routes ----------
 
@@ -625,53 +662,45 @@ app.post("/api/treino", (req, res) => {
       // Usar data fornecida ou data atual
       const dataTreino = dataRealizacao || new Date().toISOString().split('T')[0]; // Data no formato YYYY-MM-DD
 
-      // Armazenar exercícios temporariamente para usar na finalização
-      if (!global.pendingWorkouts) {
-        global.pendingWorkouts = {};
-      }
-      global.pendingWorkouts[newTreinoId] = exercicios;
-
-      // Inserir o treino com status='draft' (será confirmado ao finalizar sessão)
-      
-      // Verificar se o campo nome existe na tabela, se não existir, inserir sem nome
-      db.query("INSERT INTO treino (id_treino, id_users, nome, data_treino, status) VALUES (?, ?, ?, ?, 'draft')", 
+      // Inserir o treino na base de dados
+      db.query("INSERT INTO treino (id_treino, id_users, nome, data_treino) VALUES (?, ?, ?, ?)", 
         [newTreinoId, userId, nome.trim(), dataTreino], (err, result) => {
         if (err) {
           console.error("[API] POST /api/treino - Erro ao inserir treino:", err);
-          
-          // Se o erro for porque o campo nome não existe, tentar sem nome
-          if (err.code === 'ER_BAD_FIELD_ERROR' && err.sqlMessage && err.sqlMessage.includes('nome')) {
-            db.query("INSERT INTO treino (id_treino, id_users, data_treino) VALUES (?, ?, ?)", 
-              [newTreinoId, userId, dataTreino], (err2, result2) => {
-              if (err2) {
-                console.error("[API] POST /api/treino - Erro ao inserir treino sem nome:", err2);
-                return res.status(500).json({ 
-                  erro: "Erro ao criar treino.",
-                  detalhes: "O campo 'nome' não existe na tabela. Execute o script SQL para adicionar o campo."
-                });
-              }
-              // Continuar com a inserção dos exercícios mesmo sem nome
-              insertExercicios();
-            });
-            return;
-          }
-          
           return res.status(500).json({ 
             erro: "Erro ao criar treino.",
             detalhes: err.sqlMessage || err.message
           });
         }
-        
-            // Responder com sucesso - exercícios serão inseridos ao finalizar sessão
+
+        // Inserir os exercícios em treino_exercicio imediatamente
+        insertExercicios();
+
+        function insertExercicios() {
+          const exercicioValues = exercicios.map(exId => [newTreinoId, exId]);
+          const placeholders = exercicios.map(() => "(?, ?)").join(", ");
+          const values = exercicioValues.flat();
+
+          db.query(`INSERT INTO treino_exercicio (id_treino, id_exercicio) VALUES ${placeholders}`,
+            values, (err2) => {
+            if (err2) {
+              console.error("[API] POST /api/treino - Erro ao inserir exercícios:", err2);
+              return res.status(500).json({ 
+                erro: "Treino criado mas erro ao guardar exercícios.",
+                detalhes: err2.sqlMessage || err2.message
+              });
+            }
+
             res.json({ 
               sucesso: true, 
-              mensagem: "Treino criado como rascunho! Complete o treino para o guardar na base de dados.", 
+              mensagem: "Treino criado com sucesso!", 
               id_treino: newTreinoId,
               nome: nome,
               data_treino: dataTreino,
-              exercicios: exercicios.length,
-              status: "draft"
+              exercicios: exercicios.length
             });
+          });
+        }
       });
     });
   });
@@ -684,7 +713,6 @@ app.post("/api/treino", (req, res) => {
 app.get("/api/sessoes/:userId", (req, res) => {
   const { userId } = req.params;
 
-  // Obter apenas treinos que têm sessões completadas (com data_fim)
   const sql = `
     SELECT 
       t.id_treino,
@@ -694,15 +722,20 @@ app.get("/api/sessoes/:userId", (req, res) => {
       ts.duracao_segundos,
       DATE_SUB(ts.data_fim, INTERVAL ts.duracao_segundos SECOND) as data_inicio_calculada,
       t.nome as nome_treino,
-      ts.data_fim as data_para_ordenar
+      ts.data_fim as data_para_ordenar,
+      COUNT(te.id_exercicio) as num_exercicios,
+      GROUP_CONCAT(DISTINCT e.grupo_tipo SEPARATOR ', ') as grupo_tipo
     FROM treino t
     INNER JOIN treino_sessao ts ON t.id_treino = ts.id_treino AND ts.id_users = ?
+    LEFT JOIN treino_exercicio te ON t.id_treino = te.id_treino
+    LEFT JOIN exercicios e ON te.id_exercicio = e.id_exercicio
     WHERE t.id_users = ? AND ts.data_fim IS NOT NULL
       AND ts.id_sessao = (
         SELECT id_sessao FROM treino_sessao 
         WHERE id_treino = t.id_treino AND id_users = ? AND data_fim IS NOT NULL
         ORDER BY data_fim DESC LIMIT 1
       )
+    GROUP BY t.id_treino, ts.id_sessao, t.data_treino, ts.data_fim, ts.duracao_segundos, t.nome
     ORDER BY data_para_ordenar DESC, t.id_treino DESC
   `;
 
@@ -720,8 +753,8 @@ app.get("/api/sessoes/:userId", (req, res) => {
       data_inicio: sessao.data_inicio_calculada || sessao.data_treino,
       data_fim: sessao.data_fim,
       duracao_segundos: sessao.duracao_segundos,
-      num_exercicios: 0,
-      grupo_tipo: null
+      num_exercicios: sessao.num_exercicios || 0,
+      grupo_tipo: sessao.grupo_tipo || null
     }));
 
     res.json(sessoes);
@@ -866,6 +899,7 @@ app.get("/api/treino/:userId", (req, res) => {
       t.id_treino,
       t.nome,
       t.data_treino,
+      t.is_ia,
       COUNT(te.id_exercicio) as num_exercicios,
       GROUP_CONCAT(e.nome SEPARATOR ', ') as exercicios_nomes,
       GROUP_CONCAT(DISTINCT e.grupo_tipo SEPARATOR ', ') as grupo_tipo
@@ -873,7 +907,7 @@ app.get("/api/treino/:userId", (req, res) => {
     LEFT JOIN treino_exercicio te ON t.id_treino = te.id_treino
     LEFT JOIN exercicios e ON te.id_exercicio = e.id_exercicio
     WHERE t.id_users = ?
-    GROUP BY t.id_treino, t.nome, t.data_treino
+    GROUP BY t.id_treino, t.nome, t.data_treino, t.is_ia
     ORDER BY t.data_treino DESC, t.id_treino DESC
   `;
 
@@ -926,6 +960,7 @@ app.get("/api/treino/:userId", (req, res) => {
       id_treino: treino.id_treino,
       nome: treino.nome || `Treino ${treino.id_treino}`, // Nome padrão se não existir
       data_treino: treino.data_treino,
+      is_ia: treino.is_ia || 0,
       num_exercicios: treino.num_exercicios || 0,
       exercicios_nomes: treino.exercicios_nomes || "",
       grupo_tipo: treino.grupo_tipo || null
@@ -1183,275 +1218,107 @@ app.delete("/api/treino/:userId/:treinoId", (req, res) => {
       return res.status(404).json({ erro: "Treino não encontrado." });
     }
 
-    // Apagar exercícios do treino
-    db.query("DELETE FROM treino_exercicio WHERE id_treino = ?", [treinoId], (err2) => {
+    // Obter todas as sessões do treino para poder apagar as séries
+    db.query("SELECT id_sessao FROM treino_sessao WHERE id_treino = ?", [treinoId], (err2, sessoes) => {
       if (err2) {
-        console.error("[API] DELETE /api/treino/:userId/:treinoId - Erro ao apagar exercícios:", err2);
-        return res.status(500).json({ erro: "Erro ao apagar exercícios do treino." });
+        console.error("[API] DELETE /api/treino - Erro ao obter sessões:", err2);
+        return res.status(500).json({ erro: "Erro ao apagar treino." });
       }
 
-      // Apagar treino
-      db.query("DELETE FROM treino WHERE id_treino = ? AND id_users = ?", [treinoId, userId], (err3) => {
-        if (err3) {
-          console.error("[API] DELETE /api/treino/:userId/:treinoId - Erro ao apagar treino:", err3);
-          return res.status(500).json({ erro: "Erro ao apagar treino." });
-        }
+      const sessaoIds = sessoes.map(s => s.id_sessao);
 
-        res.json({ sucesso: true, mensagem: "Treino apagado com sucesso!" });
+      // Apagar séries de todas as sessões (se existirem)
+      const deleteSeries = (cb) => {
+        if (sessaoIds.length === 0) return cb();
+        const placeholders = sessaoIds.map(() => "?").join(", ");
+        db.query(`DELETE FROM treino_serie WHERE id_sessao IN (${placeholders})`, sessaoIds, (err3) => {
+          if (err3) {
+            console.error("[API] DELETE /api/treino - Erro ao apagar séries:", err3);
+            return res.status(500).json({ erro: "Erro ao apagar séries do treino." });
+          }
+          cb();
+        });
+      };
+
+      deleteSeries(() => {
+        // Apagar todas as sessões do treino
+        db.query("DELETE FROM treino_sessao WHERE id_treino = ?", [treinoId], (err4) => {
+          if (err4) {
+            console.error("[API] DELETE /api/treino - Erro ao apagar sessões:", err4);
+            return res.status(500).json({ erro: "Erro ao apagar sessões do treino." });
+          }
+
+          // Apagar exercícios do treino
+          db.query("DELETE FROM treino_exercicio WHERE id_treino = ?", [treinoId], (err5) => {
+            if (err5) {
+              console.error("[API] DELETE /api/treino - Erro ao apagar exercícios:", err5);
+              return res.status(500).json({ erro: "Erro ao apagar exercícios do treino." });
+            }
+
+            // Apagar o treino
+            db.query("DELETE FROM treino WHERE id_treino = ? AND id_users = ?", [treinoId, userId], (err6) => {
+              if (err6) {
+                console.error("[API] DELETE /api/treino - Erro ao apagar treino:", err6);
+                return res.status(500).json({ erro: "Erro ao apagar treino." });
+              }
+
+              res.json({ sucesso: true, mensagem: "Treino apagado com sucesso!" });
+            });
+          });
+        });
       });
     });
   });
 });
 
-// Start workout session - Iniciar treino
-app.post("/api/treino/:userId/:treinoId/iniciar", (req, res) => {
-  const { userId, treinoId } = req.params;
+// Save complete workout session in a single request
+app.post("/api/treino/sessao/guardar", (req, res) => {
+  const { userId, treinoId, duracao_segundos, series } = req.body;
 
-  console.log(`🏃 Iniciando treino - User ID: ${userId}, Treino ID: ${treinoId}`);
-
-  // Verificar se o treino pertence ao utilizador
-  db.query("SELECT * FROM treino WHERE id_treino = ? AND id_users = ?", [treinoId, userId], (err, treinoRows) => {
-    if (err) {
-      console.error(`❌ Erro ao verificar treino ${treinoId} do user ${userId}:`, err);
-      return res.status(500).json({ erro: "Erro ao verificar treino." });
-    }
-
-    if (treinoRows.length === 0) {
-      console.warn(`⚠️ Treino ${treinoId} não pertence ao user ${userId}`);
-      return res.status(404).json({ erro: "Treino não encontrado." });
-    }
-    
-    console.log(`✅ Treino ${treinoId} encontrado. Criando sessão...`);
-    
-    // Criar sessão de treino (sem data_inicio - será calculado como data_fim - duracao_segundos)
-    db.query("INSERT INTO treino_sessao (id_treino, id_users) VALUES (?, ?)", 
-      [treinoId, userId], (err2, result) => {
-      if (err2) {
-        console.error(`❌ Erro ao criar sessão para treino ${treinoId}:`, err2);
-        return res.status(500).json({ erro: "Erro ao iniciar treino." });
-      }
-
-      const sessionId = result.insertId;
-      
-      console.log(`✅ Sessão ${sessionId} criada com sucesso!`);
-      
-      res.json({ 
-        sucesso: true, 
-        id_sessao: sessionId
-      });
-    });
-  });
-});
-
-// End workout session - Terminar treino
-app.post("/api/treino/sessao/:sessaoId/terminar", (req, res) => {
-  const { sessaoId } = req.params;
-  const { duracao_segundos } = req.body;
-
-  db.query("UPDATE treino_sessao SET data_fim = NOW(), duracao_segundos = ? WHERE id_sessao = ?", 
-    [duracao_segundos, sessaoId], (err) => {
-    if (err) {
-      console.error("[API] POST /api/treino/sessao/:sessaoId/terminar - Erro:", err);
-      return res.status(500).json({ erro: "Erro ao terminar treino." });
-    }
-
-    res.json({ sucesso: true, mensagem: "Treino terminado com sucesso!" });
-  });
-});
-
-// Save workout set - Guardar série (suporta cardio: distância/tempo)
-app.post("/api/treino/sessao/:sessaoId/serie", (req, res) => {
-  const { sessaoId } = req.params;
-  const { id_exercicio, numero_serie, repeticoes, peso, distancia_km, tempo_segundos } = req.body;
-
-  const distancia = distancia_km !== undefined ? parseFloat(distancia_km) : (peso !== undefined ? parseFloat(peso) : null);
-  const tempo = tempo_segundos !== undefined ? parseInt(tempo_segundos, 10) : (repeticoes !== undefined ? parseInt(repeticoes, 10) : null);
-  const isCardio = distancia_km !== undefined || tempo_segundos !== undefined;
-
-  if (!id_exercicio || !numero_serie) {
-    return res.status(400).json({ erro: "id_exercicio e numero_serie são obrigatórios." });
+  if (!userId || !treinoId || !series || !Array.isArray(series) || series.length === 0) {
+    return res.status(400).json({ erro: "userId, treinoId e series são obrigatórios." });
   }
 
-  if (isCardio) {
-    const distanciaValida = distancia !== null && !Number.isNaN(distancia) && distancia > 0;
-    const tempoValido = tempo !== null && !Number.isNaN(tempo) && tempo > 0;
-    if (!distanciaValida || !tempoValido) {
-      return res.status(400).json({ erro: "Para cardio, informe distância (>0) e tempo (>0)." });
-    }
-  } else if (tempo === null || Number.isNaN(tempo)) {
-    return res.status(400).json({ erro: "repeticoes são obrigatórias." });
-  }
-
+  // Create session with duration and finish time set immediately
   db.query(
-    "INSERT INTO treino_serie (id_sessao, id_exercicio, numero_serie, repeticoes, peso) VALUES (?, ?, ?, ?, ?)",
-    [sessaoId, id_exercicio, numero_serie, tempo || null, distancia || null],
+    "INSERT INTO treino_sessao (id_treino, id_users, data_fim, duracao_segundos) VALUES (?, ?, NOW(), ?)",
+    [treinoId, userId, duracao_segundos || 0],
     (err, result) => {
       if (err) {
-        console.error("[API] POST /api/treino/sessao/:sessaoId/serie - Erro:", err);
-        return res.status(500).json({ erro: "Erro ao guardar série." });
+        console.error("[API] POST /api/treino/sessao/guardar - Erro ao criar sessão:", err);
+        return res.status(500).json({ erro: "Erro ao guardar sessão." });
       }
 
-      res.json({ sucesso: true, mensagem: "Série guardada com sucesso!", id_serie: result?.insertId });
+      const sessaoId = result.insertId;
+
+      // Insert all series at once
+      const values = series.map((s) => [sessaoId, s.id_exercicio, s.numero_serie, s.repeticoes || 0, s.peso || 0]);
+      const placeholders = values.map(() => "(?, ?, ?, ?, ?)").join(", ");
+      const flatValues = values.flat();
+
+      db.query(
+        `INSERT INTO treino_serie (id_sessao, id_exercicio, numero_serie, repeticoes, peso) VALUES ${placeholders}`,
+        flatValues,
+        (err2) => {
+          if (err2) {
+            console.error("[API] POST /api/treino/sessao/guardar - Erro ao guardar séries:", err2);
+            return res.status(500).json({ erro: "Erro ao guardar séries." });
+          }
+
+          // Mark workout as completed (required for streak calculation)
+          db.query("UPDATE treino SET status = 'completed' WHERE id_treino = ?", [treinoId], (err3) => {
+            if (err3) {
+              console.warn("[API] POST /api/treino/sessao/guardar - Erro ao atualizar status:", err3);
+            }
+            res.json({ sucesso: true, mensagem: "Treino guardado com sucesso!", id_sessao: sessaoId });
+          });
+        }
+      );
     }
   );
 });
 
-// Finalize workout session - Concluir treino
-// Valida elegibilidade (todos exercícios com séries) antes de guardar
-app.post("/api/treino/sessao/:sessaoId/finalizar", (req, res) => {
-  const { sessaoId } = req.params;
-  const { duracao_segundos } = req.body;
-
-  // Obter info da sessão
-  db.query("SELECT id_treino, id_users FROM treino_sessao WHERE id_sessao = ?", [sessaoId], (err, rows) => {
-    if (err) {
-      console.error("[API] POST /api/treino/sessao/:sessaoId/finalizar - Erro ao obter sessão:", err);
-      return res.status(500).json({ erro: "Erro ao finalizar treino." });
-    }
-    if (rows.length === 0) {
-      return res.status(404).json({ erro: "Sessão não encontrada." });
-    }
-
-    const treinoId = rows[0].id_treino;
-    const pendingEx = global.pendingWorkouts && global.pendingWorkouts[treinoId] ? global.pendingWorkouts[treinoId] : [];
-
-    // VALIDAÇÃO: Se há exercícios planejados, verificar se todos têm séries
-    if (pendingEx.length > 0) {
-      const placeholders = pendingEx.map(() => "?").join(",");
-      db.query(
-        "SELECT DISTINCT id_exercicio FROM treino_serie WHERE id_sessao = ? AND id_exercicio IN (" + placeholders + ")",
-        [sessaoId, ...pendingEx],
-        (err2, seriesRows) => {
-          if (err2) {
-            console.error("[API] POST /api/treino/sessao/:sessaoId/finalizar - Erro ao verificar séries:", err2);
-            return res.status(500).json({ erro: "Erro ao validar treino." });
-          }
-
-          const exercisosComSeries = seriesRows.map(r => r.id_exercicio);
-          const faltantes = pendingEx.filter(ex => !exercisosComSeries.includes(ex));
-
-          if (faltantes.length > 0) {
-            return res.status(400).json({ 
-              erro: "Treino incompleto!", 
-              detalhes: "Complete todos os exercícios do plano",
-              exerciciosFaltantes: faltantes,
-              elegivel: false
-            });
-          }
-
-          // ELEGÍVEL! Prosseguir
-          procederComFinalizacao(treinoId);
-        }
-      );
-    } else {
-      procederComFinalizacao(treinoId);
-    }
-
-    function procederComFinalizacao(treinoId) {
-      const pendingEx = global.pendingWorkouts && global.pendingWorkouts[treinoId] ? global.pendingWorkouts[treinoId] : [];
-      
-      // Inserir exercícios
-      if (pendingEx.length > 0) {
-        const values = pendingEx.flatMap(ex => [treinoId, ex]);
-        const placeholders = pendingEx.map(() => "(?, ?)").join(", ");
-        
-        db.query(
-          "INSERT INTO treino_exercicio (id_treino, id_exercicio) VALUES " + placeholders,
-          values,
-          (errInsert) => {
-            if (errInsert) {
-              console.error("[API] POST /api/treino/sessao/:sessaoId/finalizar - Erro ao inserir exercícios:", errInsert);
-              return res.status(500).json({ erro: "Erro ao guardar exercícios." });
-            }
-            delete global.pendingWorkouts[treinoId];
-            finalizarBD(treinoId);
-          }
-        );
-      } else {
-        finalizarBD(treinoId);
-      }
-
-      function finalizarBD(treinoId) {
-        // Atualizar treino para 'completed'
-        db.query("UPDATE treino SET status = 'completed' WHERE id_treino = ?", [treinoId], (errUpdate) => {
-          if (errUpdate) {
-            console.error("[API] POST /api/treino/sessao/:sessaoId/finalizar - Erro ao atualizar treino:", errUpdate);
-            return res.status(500).json({ erro: "Erro ao finalizar treino." });
-          }
-
-          // Finalizar sessão
-          db.query(
-            "UPDATE treino_sessao SET data_fim = NOW(), duracao_segundos = ? WHERE id_sessao = ?",
-            [duracao_segundos, sessaoId],
-            (errSession) => {
-              if (errSession) {
-                console.error("[API] POST /api/treino/sessao/:sessaoId/finalizar - Erro ao finalizar sessão:", errSession);
-                return res.status(500).json({ erro: "Erro ao finalizar treino." });
-              }
-
-              res.json({ 
-                sucesso: true, 
-                mensagem: "Treino finalizado e guardado com sucesso!",
-                elegivel: true
-              });
-            }
-          );
-        });
-      }
-    }
-  });
-});
-
-// Cancel workout session - Cancelar treino
-// Remove rascunho também se não foi finalizado
-app.delete("/api/treino/sessao/:sessaoId/cancelar", (req, res) => {
-  const { sessaoId } = req.params;
-
-  // Obter o treino associado
-  db.query("SELECT id_treino FROM treino_sessao WHERE id_sessao = ?", [sessaoId], (err, rows) => {
-    if (err) {
-      console.error("[API] DELETE /api/treino/sessao/:sessaoId/cancelar - Erro ao obter treino:", err);
-      return res.status(500).json({ erro: "Erro ao cancelar treino." });
-    }
-
-    const treinoId = rows && rows.length > 0 ? rows[0].id_treino : null;
-
-    // Apagar séries da sessão
-    db.query("DELETE FROM treino_serie WHERE id_sessao = ?", [sessaoId], (err2) => {
-      if (err2) {
-        console.error("[API] DELETE /api/treino/sessao/:sessaoId/cancelar - Erro ao apagar séries:", err2);
-        return res.status(500).json({ erro: "Erro ao cancelar treino." });
-      }
-
-      // Apagar a sessão
-      db.query("DELETE FROM treino_sessao WHERE id_sessao = ?", [sessaoId], (err3) => {
-        if (err3) {
-          console.error("[API] DELETE /api/treino/sessao/:sessaoId/cancelar - Erro ao apagar sessão:", err3);
-          return res.status(500).json({ erro: "Erro ao cancelar treino." });
-        }
-
-        // Se o treino ainda está em 'draft' (não completado), apagar também
-        if (treinoId) {
-          db.query("DELETE FROM treino WHERE id_treino = ? AND status = 'draft'", [treinoId], (err4) => {
-            if (err4) {
-              console.warn("[API] DELETE /api/treino/sessao/:sessaoId/cancelar - Erro ao apagar treino rascunho:", err4);
-              // Não retornar erro, pois a sessão já foi cancelada
-            }
-            
-            // Limpar do pendingWorkouts
-            if (global.pendingWorkouts && global.pendingWorkouts[treinoId]) {
-              delete global.pendingWorkouts[treinoId];
-            }
-
-            res.json({ sucesso: true, mensagem: "Treino cancelado com sucesso!" });
-          });
-        } else {
-          res.json({ sucesso: true, mensagem: "Treino cancelado com sucesso!" });
-        }
-      });
-    });
-  });
-});
+// (endpoints legacy /iniciar /serie /finalizar /cancelar removidos — substituídos por /api/treino/sessao/guardar)
 
 // Get full workout details with exercises, series, weight and reps
 app.get("/api/treino-sessao-detalhes/:sessaoId", (req, res) => {
@@ -2346,6 +2213,24 @@ app.get("/api/comunidades/:id/membros", (req, res) => {
 
 // ================== ENDPOINTS DE ADMIN ==================
 
+// GET /api/admin/comunidades - obter todas as comunidades (verificadas + pendentes)
+app.get("/api/admin/comunidades", (req, res) => {
+  const sql = `
+    SELECT c.*, u.userName as criador_nome,
+           (SELECT COUNT(*) FROM comunidade_membros WHERE comunidade_id = c.id) as membros
+    FROM comunidades c
+    LEFT JOIN users u ON c.criador_id = u.id_users
+    ORDER BY c.verificada ASC, c.criada_em ASC
+  `;
+  db.query(sql, (err, results) => {
+    if (err) {
+      console.error("Erro ao obter comunidades:", err);
+      return res.status(500).json({ erro: "Erro ao obter comunidades" });
+    }
+    res.json(results || []);
+  });
+});
+
 // GET /api/admin/comunidades/pendentes - obter comunidades não verificadas
 app.get("/api/admin/comunidades/pendentes", (req, res) => {
   const sql = `
@@ -2410,6 +2295,569 @@ app.post("/api/admin/comunidades/:id/toggle", (req, res) => {
     }
     res.json({ sucesso: true, mensagem: "Status atualizado com sucesso" });
   });
+});
+
+// ================== RECUPERAÇÃO DE PASSWORD ==================
+
+// Passo 1: Solicitar código de recuperação
+app.post("/api/auth/forgot-password", (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ erro: "Email obrigatório" });
+
+  const sql = "SELECT id_users FROM users WHERE email = ?";
+  db.query(sql, [email], async (err, results) => {
+    if (err) return res.status(500).json({ erro: "Erro na base de dados" });
+    if (results.length === 0) {
+      // Resposta genérica para não revelar se o email existe
+      return res.json({ sucesso: true });
+    }
+
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiry = Date.now() + 15 * 60 * 1000; // 15 minutos
+    resetCodes.set(email.toLowerCase(), { code, expiry });
+
+    // Enviar email
+    try {
+      await emailTransporter.sendMail({
+        from: `"GoLift" <${process.env.EMAIL_USER}>`,
+        to: email,
+        subject: "Código de Recuperação de Password — GoLift",
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 24px; background: #f9f9f9; border-radius: 12px;">
+            <h2 style="color: #111; text-align: center;">Recuperação de Password</h2>
+            <p style="color: #555;">Olá,</p>
+            <p style="color: #555;">Recebemos um pedido para redefinir a password da tua conta GoLift.</p>
+            <p style="color: #555;">Usa o seguinte código (válido por <strong>15 minutos</strong>):</p>
+            <div style="text-align: center; margin: 32px 0;">
+              <span style="font-size: 36px; font-weight: bold; letter-spacing: 8px; color: #111; background: #e5e7eb; padding: 16px 24px; border-radius: 8px;">${code}</span>
+            </div>
+            <p style="color: #999; font-size: 12px;">Se não fizeste este pedido, podes ignorar este email.</p>
+          </div>
+        `,
+      });
+
+      console.log(`[Password Reset] Código enviado para ${email}`);
+      res.json({ sucesso: true });
+    } catch (emailErr) {
+      console.error("[Password Reset] Erro ao enviar email:", emailErr.message);
+      console.log(`[Password Reset] Código de teste para ${email}: ${code}`);
+      res.json({ sucesso: true, codigo_teste: code });
+    }
+  });
+});
+
+// Passo 2: Verificar código
+app.post("/api/auth/verify-reset-code", (req, res) => {
+  const { email, code } = req.body;
+  if (!email || !code) return res.status(400).json({ erro: "Email e código obrigatórios" });
+
+  const entry = resetCodes.get(email.toLowerCase());
+  if (!entry) return res.status(400).json({ erro: "Nenhum pedido de recuperação encontrado" });
+  if (Date.now() > entry.expiry) {
+    resetCodes.delete(email.toLowerCase());
+    return res.status(400).json({ erro: "Código expirado. Solicita um novo." });
+  }
+  if (entry.code !== code) return res.status(400).json({ erro: "Código inválido" });
+
+  res.json({ sucesso: true });
+});
+
+// Passo 3: Redefinir password
+app.post("/api/auth/reset-password", async (req, res) => {
+  const { email, code, newPassword } = req.body;
+  if (!email || !code || !newPassword) return res.status(400).json({ erro: "Dados incompletos" });
+  if (newPassword.length < 6) return res.status(400).json({ erro: "A senha deve ter pelo menos 6 caracteres" });
+
+  const entry = resetCodes.get(email.toLowerCase());
+  if (!entry) return res.status(400).json({ erro: "Nenhum pedido de recuperação encontrado" });
+  if (Date.now() > entry.expiry) {
+    resetCodes.delete(email.toLowerCase());
+    return res.status(400).json({ erro: "Código expirado. Solicita um novo." });
+  }
+  if (entry.code !== code) return res.status(400).json({ erro: "Código inválido" });
+
+  try {
+    const hash = await bcrypt.hash(newPassword, 10);
+    db.query("UPDATE users SET password = ? WHERE email = ?", [hash, email], (err) => {
+      if (err) return res.status(500).json({ erro: "Erro ao atualizar password" });
+      resetCodes.delete(email.toLowerCase());
+      console.log(`[Password Reset] Password atualizada para ${email}`);
+      res.json({ sucesso: true });
+    });
+  } catch (err) {
+    res.status(500).json({ erro: "Erro ao processar pedido" });
+  }
+});
+
+// ================== STRIPE CHECKOUT ==================
+
+// Criar sessão de checkout
+app.post("/api/stripe/checkout-session", async (req, res) => {
+  const { userId } = req.body;
+  if (!userId) return res.status(400).json({ erro: "userId obrigatório" });
+
+  try {
+    const session = await stripe.checkout.sessions.create({
+      mode: "subscription",
+      payment_method_types: ["card"],
+      line_items: [{ price: process.env.STRIPE_PRICE_ID, quantity: 1 }],
+      metadata: { userId: String(userId) },
+      success_url: `${process.env.APP_URL}?pagamento=sucesso`,
+      cancel_url: `${process.env.APP_URL}?pagamento=cancelado`,
+    });
+    res.json({ sucesso: true, url: session.url, sessionId: session.id });
+  } catch (err) {
+    console.error("[Stripe] Erro ao criar sessão:", err.message);
+    res.status(500).json({ erro: "Erro ao criar sessão de pagamento" });
+  }
+});
+
+// Verificar plano do utilizador
+app.get("/api/plano/:userId", (req, res) => {
+  const { userId } = req.params;
+  db.query(
+    "SELECT plano, plano_ativo_ate FROM users WHERE id_users = ?",
+    [userId],
+    (err, rows) => {
+      if (err) return res.status(500).json({ erro: "Erro na base de dados" });
+      if (!rows.length) return res.status(404).json({ erro: "Utilizador não encontrado" });
+
+      const user = rows[0];
+      const agora = new Date();
+      const ativo = user.plano === "pago" && (!user.plano_ativo_ate || new Date(user.plano_ativo_ate) > agora);
+
+      // Se expirou, reverter para free
+      if (user.plano === "pago" && !ativo) {
+        db.query("UPDATE users SET plano = 'free' WHERE id_users = ?", [userId]);
+      }
+
+      res.json({ plano: ativo ? "pago" : "free", ativo_ate: user.plano_ativo_ate });
+    }
+  );
+});
+
+// ================== AI — RELATÓRIO SEMANAL ==================
+
+// Obter relatório da semana passada (cached ou gerar)
+app.get("/api/ai/report/:userId", limiterAI, async (req, res) => {
+  const { userId } = req.params;
+
+  // Verificar plano
+  const userRow = await new Promise((resolve) => {
+    db.query("SELECT plano, plano_ativo_ate FROM users WHERE id_users = ?", [userId], (err, rows) => {
+      if (err) { console.error("[AI report] DB err:", err.message); return resolve(null); }
+      resolve(rows.length ? rows[0] : null);
+    });
+  });
+  if (!userRow) return res.status(404).json({ erro: "Utilizador não encontrado" });
+  const agora = new Date();
+  const temPlano = userRow.plano === "pago" && (!userRow.plano_ativo_ate || new Date(userRow.plano_ativo_ate) > agora);
+  if (!temPlano) return res.status(403).json({ erro: "Plano GoLift Pro necessário", codigo: "PLANO_NECESSARIO" });
+
+  // Calcular semana passada (segunda-feira a domingo)
+  const hoje = new Date();
+  const diaSemana = hoje.getDay(); // 0=Dom, 1=Seg...
+  // Dias desde a segunda-feira desta semana
+  const diasDesdeSegunda = diaSemana === 0 ? 6 : diaSemana - 1;
+  // Segunda da semana passada
+  const segundaPassada = new Date(hoje);
+  segundaPassada.setDate(hoje.getDate() - diasDesdeSegunda - 7);
+  segundaPassada.setHours(0, 0, 0, 0);
+  // Domingo da semana passada (6 dias depois da segunda)
+  const domingoPassado = new Date(segundaPassada);
+  domingoPassado.setDate(segundaPassada.getDate() + 6);
+  domingoPassado.setHours(23, 59, 59, 999);
+  const semanaInicio = segundaPassada.toISOString().split("T")[0];
+  console.log(`[AI report] Semana passada: ${semanaInicio} a ${domingoPassado.toISOString().split('T')[0]}, userId=${userId}`);
+
+  // Verificar cache
+  const cached = await new Promise((resolve) => {
+    db.query(
+      "SELECT conteudo FROM ai_reports WHERE user_id = ? AND semana_inicio = ?",
+      [userId, semanaInicio],
+      (err, rows) => resolve(err || !rows.length ? null : rows[0].conteudo)
+    );
+  });
+  if (cached) {
+    try { return res.json({ sucesso: true, relatorio: JSON.parse(cached), semana_inicio: semanaInicio, cached: true }); }
+    catch { return res.json({ sucesso: true, relatorio: cached, semana_inicio: semanaInicio, cached: true }); }
+  }
+
+  // Recolher dados da semana passada
+  const treinos = await new Promise((resolve) => {
+    db.query(
+      `SELECT ts.id_sessao, ts.data_fim AS data_inicio, ts.duracao_segundos,
+              t.nome AS nome_treino,
+              GROUP_CONCAT(DISTINCT e.grupo_tipo ORDER BY e.grupo_tipo SEPARATOR ', ') AS musculos,
+              COUNT(DISTINCT te.id_exercicio) AS num_exercicios,
+              COALESCE(MAX(tse.peso), 0) AS peso_max
+       FROM treino_sessao ts
+       JOIN treino t ON ts.id_treino = t.id_treino
+       LEFT JOIN treino_exercicio te ON te.id_treino = t.id_treino
+       LEFT JOIN exercicios e ON e.id_exercicio = te.id_exercicio
+       LEFT JOIN treino_serie tse ON tse.id_sessao = ts.id_sessao AND tse.id_exercicio = te.id_exercicio
+       WHERE ts.id_users = ? AND ts.data_fim BETWEEN ? AND ? AND ts.data_fim IS NOT NULL
+       GROUP BY ts.id_sessao, ts.data_fim, ts.duracao_segundos, t.nome`,
+      [userId, segundaPassada, domingoPassado],
+      (err, rows) => { if (err) { console.error('[AI report] Query err:', err.message); return resolve([]); } resolve(rows); }
+    );
+  });
+
+  const perfil = await new Promise((resolve) => {
+    db.query(
+      "SELECT userName, peso, altura, idade FROM users WHERE id_users = ?",
+      [userId],
+      (err, rows) => resolve(err || !rows.length ? {} : rows[0])
+    );
+  });
+
+  if (treinos.length === 0) {
+    return res.json({
+      sucesso: true,
+      relatorio: {
+        avaliacao: "Não realizaste nenhum treino na semana passada.",
+        equilibrio: "Sem dados para analisar.",
+        progressao: "Sem dados para analisar.",
+        descanso: "Sem dados para analisar.",
+        melhorias: ["Começa a registar os teus treinos", "Define uma meta semanal", "Treina pelo menos 2 vezes esta semana"]
+      },
+      semana_inicio: semanaInicio,
+      cached: false
+    });
+  }
+
+  // Construir prompt
+  const treinosSummary = treinos.map((t, i) => {
+    const data = new Date(t.data_inicio).toLocaleDateString("pt-PT", { weekday: "long", day: "2-digit", month: "2-digit" });
+    const duracao = t.duracao_segundos ? `${Math.round(t.duracao_segundos / 60)} min` : "duração desconhecida";
+    return `  Treino ${i + 1} (${data}): "${t.nome_treino}", ${duracao}, músculos: ${t.musculos || "não registados"}, ${t.num_exercicios} exercícios, peso máximo: ${t.peso_max}kg`;
+  }).join("\n");
+
+  const prompt = `Analisa os dados de treino semanais de um utilizador da app GoLift e gera um relatório simples e motivador em português europeu.
+
+Perfil: objetivo "${perfil.objetivo || "não definido"}", ${perfil.peso || "?"}kg, ${perfil.altura || "?"}cm, ${perfil.idade || "?"}anos.
+
+Semana de ${semanaInicio}:
+${treinosSummary}
+
+Responde APENAS com JSON válido (sem markdown, sem código blocks) com exatamente esta estrutura:
+{
+  "avaliacao": "parágrafo curto de avaliação geral (máx 2 frases)",
+  "equilibrio": "análise do equilíbrio muscular (máx 2 frases)",
+  "progressao": "análise da progressão de cargas (máx 2 frases)",
+  "descanso": "análise do descanso e recuperação (máx 2 frases)",
+  "melhorias": ["melhoria concreta 1", "melhoria concreta 2", "melhoria concreta 3"]
+}`;
+
+  try {
+    const rawText = await geminiGenerate(prompt);
+    const text = rawText.trim().replace(/```json\n?|\n?```/g, "");
+    const relatorio = JSON.parse(text);
+
+    // Guardar cache
+    db.query(
+      "INSERT INTO ai_reports (user_id, semana_inicio, conteudo) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE conteudo = VALUES(conteudo)",
+      [userId, semanaInicio, JSON.stringify(relatorio)]
+    );
+
+    console.log(`[AI] Relatório gerado para user ${userId} semana ${semanaInicio}`);
+    res.json({ sucesso: true, relatorio, semana_inicio: semanaInicio, cached: false });
+  } catch (err) {
+    console.error("[AI] Erro ao gerar relatório:", err.message);
+    const is429 = err?.message?.includes("429");
+    if (is429) {
+      // Fallback mock para desenvolvimento quando quota esgotada
+      console.warn("[AI] A usar relatório mock por quota esgotada");
+      db.query(
+        "INSERT INTO ai_reports (user_id, semana_inicio, conteudo) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE conteudo = VALUES(conteudo)",
+        [userId, semanaInicio, JSON.stringify(MOCK_RELATORIO)]
+      );
+      return res.json({ sucesso: true, relatorio: MOCK_RELATORIO, semana_inicio: semanaInicio, cached: false, mock: true });
+    }
+    res.status(500).json({ erro: "Erro ao gerar relatório. Tenta mais tarde." });
+  }
+});
+
+// ================== AI — PLANO MENSAL ==================
+
+// Obter plano do mês atual (cached ou null)
+app.get("/api/ai/plan/:userId", limiterAI, async (req, res) => {
+  const { userId } = req.params;
+
+  const userRow = await new Promise((resolve) => {
+    db.query("SELECT plano, plano_ativo_ate FROM users WHERE id_users = ?", [userId], (err, rows) => {
+      if (err) { console.error("[AI plan GET] DB err:", err.message); return resolve(null); }
+      resolve(rows.length ? rows[0] : null);
+    });
+  });
+  if (!userRow) return res.status(404).json({ erro: "Utilizador não encontrado" });
+  const agora = new Date();
+  const temPlano = userRow.plano === "pago" && (!userRow.plano_ativo_ate || new Date(userRow.plano_ativo_ate) > agora);
+  if (!temPlano) return res.status(403).json({ erro: "Plano GoLift Pro necessário", codigo: "PLANO_NECESSARIO" });
+
+  const mesAtual = `${agora.getFullYear()}-${String(agora.getMonth() + 1).padStart(2, "0")}`;
+
+  const cached = await new Promise((resolve) => {
+    db.query(
+      "SELECT conteudo, criado_em FROM ai_planos WHERE user_id = ? AND mes = ?",
+      [userId, mesAtual],
+      (err, rows) => resolve(err || !rows.length ? null : rows[0])
+    );
+  });
+
+  if (cached) {
+    try { return res.json({ sucesso: true, plano: JSON.parse(cached.conteudo), mes: mesAtual, criado_em: cached.criado_em, pode_gerar: false }); }
+    catch { return res.json({ sucesso: true, plano: cached.conteudo, mes: mesAtual, criado_em: cached.criado_em, pode_gerar: false }); }
+  }
+
+  res.json({ sucesso: true, plano: null, mes: mesAtual, pode_gerar: true });
+});
+
+// Gerar plano do mês
+app.post("/api/ai/plan/:userId/generate", limiterAI, async (req, res) => {
+  const { userId } = req.params;
+  const { diasPorSemana = 4 } = req.body;
+
+  const userRow = await new Promise((resolve) => {
+    db.query("SELECT plano, plano_ativo_ate, peso, altura, idade FROM users WHERE id_users = ?", [userId], (err, rows) => {
+      if (err) { console.error("[AI plan POST] DB err:", err.message); return resolve(null); }
+      resolve(rows.length ? rows[0] : null);
+    });
+  });
+  if (!userRow) return res.status(404).json({ erro: "Utilizador não encontrado" });
+  const agora = new Date();
+  const temPlano = userRow.plano === "pago" && (!userRow.plano_ativo_ate || new Date(userRow.plano_ativo_ate) > agora);
+  if (!temPlano) return res.status(403).json({ erro: "Plano GoLift Pro necessário", codigo: "PLANO_NECESSARIO" });
+
+  const mesAtual = `${agora.getFullYear()}-${String(agora.getMonth() + 1).padStart(2, "0")}`;
+  const mesNome = agora.toLocaleDateString("pt-PT", { month: "long", year: "numeric" });
+
+  // Verificar se já gerou este mês
+  const existe = await new Promise((resolve) => {
+    db.query("SELECT id FROM ai_planos WHERE user_id = ? AND mes = ?", [userId, mesAtual], (err, rows) => {
+      resolve(!err && rows.length > 0);
+    });
+  });
+  if (existe) return res.status(400).json({ erro: "Já geraste o plano deste mês." });
+
+  const prompt = `Cria um plano de treino semanal para ${mesNome} para um utilizador com:
+- Objetivo: ${userRow.objetivo || "ganho de massa muscular"}
+- Peso: ${userRow.peso || "?"}kg, Altura: ${userRow.altura || "?"}cm, Idade: ${userRow.idade || "?"}
+- Disponibilidade: ${diasPorSemana} dias por semana
+
+Responde APENAS com JSON válido (sem markdown, sem código blocks) com exatamente esta estrutura:
+{
+  "descricao": "breve descrição do método de treino escolhido (1-2 frases)",
+  "split": [
+    {
+      "dia": "Segunda-feira",
+      "foco": "nome do grupo muscular principal",
+      "exercicios": [
+        { "nome": "nome do exercício", "series": 4, "repeticoes": "8-12", "observacao": "dica curta opcional" }
+      ]
+    }
+  ]
+}
+Inclui apenas os ${diasPorSemana} dias de treino (sem dias de descanso no array).`;
+
+  try {
+    const rawText = await geminiGenerate(prompt);
+    const text = rawText.trim().replace(/```json\n?|\n?```/g, "");
+    const plano = JSON.parse(text);
+
+    db.query(
+      "INSERT INTO ai_planos (user_id, mes, conteudo) VALUES (?, ?, ?)",
+      [userId, mesAtual, JSON.stringify(plano)],
+      (err) => {
+        if (err) { console.error("[AI] Erro ao guardar plano:", err); return res.status(500).json({ erro: "Erro ao guardar plano" }); }
+        console.log(`[AI] Plano gerado para user ${userId} mês ${mesAtual}`);
+        res.json({ sucesso: true, plano, mes: mesAtual, pode_gerar: false });
+      }
+    );
+  } catch (err) {
+    console.error("[AI] Erro ao gerar plano:", err.message);
+    const is429 = err?.message?.includes("429");
+    if (is429) {
+      // Fallback mock para desenvolvimento quando quota esgotada
+      console.warn("[AI] A usar plano mock por quota esgotada");
+      db.query(
+        "INSERT INTO ai_planos (user_id, mes, conteudo) VALUES (?, ?, ?)",
+        [userId, mesAtual, JSON.stringify(MOCK_PLANO)],
+        (dbErr) => {
+          if (dbErr) console.error("[AI] Erro ao guardar plano mock:", dbErr.message);
+          res.json({ sucesso: true, plano: MOCK_PLANO, mes: mesAtual, pode_gerar: false, mock: true });
+        }
+      );
+      return;
+    }
+    res.status(500).json({ erro: "Erro ao gerar plano. Tenta mais tarde." });
+  }
+});
+
+// Helper: detectar grupo muscular a partir do nome do exercício (PT)
+function detectarGrupoMuscular(nome) {
+  const n = nome.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const map = [
+    { grupo: "Peito",          sub: "Peito Médio",        kw: ["peito","press de peito","flexao de peito","supino"] },
+    { grupo: "Peito",          sub: "Peito Superior",     kw: ["peito superior","inclinado","incline","upper chest"] },
+    { grupo: "Peito",          sub: "Peito Inferior",     kw: ["peito inferior","declinado","decline"] },
+    { grupo: "Costas",         sub: "Dorsal",             kw: ["puxada","remada","lat pull","pulley","dorsal","grande dorsal"] },
+    { grupo: "Costas",         sub: "Trapézio",           kw: ["trapezio","encolhimento","shrug"] },
+    { grupo: "Costas",         sub: "Rombóide",           kw: ["romboide","face pull","retração"] },
+    { grupo: "Ombros",         sub: "Deltóide Anterior",  kw: ["elevacao frontal","deltoi anterior","front raise"] },
+    { grupo: "Ombros",         sub: "Deltóide Lateral",   kw: ["elevacao lateral","crucifixo invertido","lateral raise"] },
+    { grupo: "Ombros",         sub: "Deltóide Posterior", kw: ["deltoi posterior","bird","reverse fly","posterior"] },
+    { grupo: "Ombros",         sub: "Ombros",             kw: ["ombro","press de ombros","desenvolvimento","military press","press arnold","upright row"] },
+    { grupo: "Bíceps",         sub: "Bíceps",             kw: ["bicep","curl","martelo","rosca"] },
+    { grupo: "Tríceps",        sub: "Tríceps",            kw: ["tricep","extensao","testa","skull","dips","mergulho","push down","kickback"] },
+    { grupo: "Antebraços",     sub: "Antebraços",         kw: ["antebraco","pulso","wrist","grip"] },
+    { grupo: "Quadríceps",     sub: "Quadríceps",         kw: ["quadricep","agachamento","leg press","extensao de pernas","lunges","afundo","hack squat","goblet","sissy"] },
+    { grupo: "Isquiotibiais",  sub: "Isquiotibiais",      kw: ["isquio","peso morto romeno","leg curl","flexao de pernas","deadlift romeno","hamstring"] },
+    { grupo: "Glúteos",        sub: "Glúteos",            kw: ["gluteo","hip thrust","pontes","elevacao de quadril","abducao","kickback glut","donkey"] },
+    { grupo: "Gémeos",         sub: "Gémeos",             kw: ["gemeo","panturrilha","calf","plantarflexao"] },
+    { grupo: "Abdómen",        sub: "Abdómen",            kw: ["abdomen","abdominal","prancha","plank","crunch","sit up","russian twist","rollout","hollow","mountain climber","leg raise","elevacao de pernas"] },
+    { grupo: "Lombar",         sub: "Lombar",             kw: ["lombar","hiperextensao","deadlift","peso morto","superman","bird dog","back extension"] },
+    { grupo: "Full Body",      sub: "Funcional",          kw: ["burpee","clean","snatch","thruster","turkish","kettlebell","kettlebell swing","wall ball","box jump","swing","bear crawl"] },
+    { grupo: "Cardio",         sub: "Cardio",             kw: ["corrida","bicicleta","remo ergometro","passadeira","eliptica","cardio","hiit","salto","corda","spinning","jump rope","step"] },
+  ];
+  for (const entry of map) {
+    for (const kw of entry.kw) {
+      if (n.includes(kw)) return { grupo_tipo: entry.grupo, sub_tipo: entry.sub };
+    }
+  }
+  return { grupo_tipo: "Outros", sub_tipo: "Geral" };
+}
+
+// ================== IMPORT AI PLAN DAY TO WORKOUTS ==================
+app.post("/api/ai/plan/:userId/import-day", (req, res) => {
+  const { userId } = req.params;
+  const { dia, foco, exercicios } = req.body;
+
+  if (!dia || !exercicios || !Array.isArray(exercicios) || exercicios.length === 0) {
+    return res.status(400).json({ erro: "Dados inválidos" });
+  }
+
+  const nomeTreino = `${dia} — ${foco || "IA"}`;
+
+  // Helper: find or create exercise by name
+  const getOrCreateExercicio = (nome, cb) => {
+    db.query("SELECT id_exercicio FROM exercicios WHERE nome = ? LIMIT 1", [nome], (err, rows) => {
+      if (err) return cb(err);
+      if (rows.length > 0) return cb(null, rows[0].id_exercicio);
+      const { grupo_tipo, sub_tipo } = detectarGrupoMuscular(nome);
+      db.query(
+        "INSERT INTO exercicios (nome, grupo_tipo, sub_tipo) VALUES (?, ?, ?)",
+        [nome, grupo_tipo, sub_tipo],
+        (err2, result) => {
+          if (err2) return cb(err2);
+          cb(null, result.insertId);
+        }
+      );
+    });
+  };
+
+  // Get next treino id
+  db.query("SELECT IFNULL(MAX(id_treino), 0) + 1 AS next_id FROM treino", (err, rows) => {
+    if (err) return res.status(500).json({ erro: "Erro DB" });
+    const nextId = rows[0].next_id;
+
+    db.query(
+      "INSERT INTO treino (id_treino, id_users, nome, data_treino, is_ia) VALUES (?, ?, ?, NOW(), 1)",
+      [nextId, userId, nomeTreino],
+      (err2) => {
+        if (err2) return res.status(500).json({ erro: "Erro ao criar treino" });
+
+        // Process exercises sequentially
+        let index = 0;
+        const processNext = () => {
+          if (index >= exercicios.length) {
+            return res.json({ sucesso: true, id_treino: nextId, nome: nomeTreino });
+          }
+          const ex = exercicios[index++];
+          getOrCreateExercicio(ex.nome || ex.exercicio, (err3, idExercicio) => {
+            if (err3) return res.status(500).json({ erro: "Erro ao criar exercício" });
+
+            // Insert treino_exercicio link only — no series inserted
+            db.query(
+              "INSERT INTO treino_exercicio (id_treino, id_exercicio) VALUES (?, ?)",
+              [nextId, idExercicio],
+              (err4) => {
+                if (err4) return res.status(500).json({ erro: "Erro ao associar exercício" });
+                processNext();
+              }
+            );
+          });
+        };
+        processNext();
+      }
+    );
+  });
+});
+
+// ================== DAILY MOTIVATIONAL PHRASE ==================
+app.get("/api/daily-phrase", async (req, res) => {
+  // Check cache
+  db.query("SELECT frase FROM daily_phrases WHERE data = CURDATE()", (err, rows) => {
+    if (!err && rows.length > 0) {
+      return res.json({ frase: rows[0].frase, cached: true });
+    }
+
+    // Generate new phrase
+    const prompt = `Gera uma frase motivacional curta (máximo 120 caracteres) para atletas e praticantes de fitness. A frase deve ser inspiradora, em português de Portugal, e adequada para o início do dia. Responde APENAS com a frase, sem aspas, sem explicação.`;
+
+    geminiGenerate(prompt)
+      .then((text) => {
+        const frase = text.trim().replace(/^["']|["']$/g, "");
+        db.query(
+          "INSERT INTO daily_phrases (data, frase) VALUES (CURDATE(), ?) ON DUPLICATE KEY UPDATE frase = VALUES(frase)",
+          [frase],
+          () => res.json({ frase, cached: false })
+        );
+      })
+      .catch((err2) => {
+        const mockFrases = [
+          "O teu único limite és tu mesmo. Vai mais além.",
+          "Cada treino é um passo rumo à melhor versão de ti.",
+          "A consistência supera a intensidade. Aparece todos os dias.",
+          "Não treinas para ontem. Treinas para o que ainda está por vir.",
+          "Força não é o que consegues fazer. É superar o que pensavas não conseguir."
+        ];
+        const frase = mockFrases[new Date().getDate() % mockFrases.length];
+        db.query(
+          "INSERT INTO daily_phrases (data, frase) VALUES (CURDATE(), ?) ON DUPLICATE KEY UPDATE frase = VALUES(frase)",
+          [frase],
+          () => res.json({ frase, cached: false, mock: true })
+        );
+      });
+  });
+});
+
+// ================== STRIPE BILLING PORTAL ==================
+app.post("/api/stripe/portal", async (req, res) => {
+  const { userId } = req.body;
+  if (!userId) return res.status(400).json({ erro: "userId obrigatório" });
+
+  db.query("SELECT stripe_customer_id FROM users WHERE id_users = ?", [userId], async (err, rows) => {
+    if (err || rows.length === 0) return res.status(404).json({ erro: "Utilizador não encontrado" });
+    const customerId = rows[0].stripe_customer_id;
+    if (!customerId) return res.status(400).json({ erro: "Sem subscrição ativa" });
+
+    try {
+      const session = await stripe.billingPortal.sessions.create({
+        customer: customerId,
+        return_url: "exp://localhost:8081"
+      });
+      res.json({ url: session.url });
+    } catch (e) {
+      console.error("[Stripe Portal]", e.message);
+      res.status(500).json({ erro: "Erro ao criar portal" });
+    }
+  });
+});
+
+// ================== 404 HANDLER ==================
+app.use((req, res) => {
+  res.status(404).json({ erro: "Rota não encontrada" });
 });
 
 // ================== INICIAR SERVIDOR ==================
