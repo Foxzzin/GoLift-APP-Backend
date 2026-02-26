@@ -2213,6 +2213,24 @@ app.get("/api/comunidades/:id/membros", (req, res) => {
 
 // ================== ENDPOINTS DE ADMIN ==================
 
+// GET /api/admin/comunidades - obter todas as comunidades (verificadas + pendentes)
+app.get("/api/admin/comunidades", (req, res) => {
+  const sql = `
+    SELECT c.*, u.userName as criador_nome,
+           (SELECT COUNT(*) FROM comunidade_membros WHERE comunidade_id = c.id) as membros
+    FROM comunidades c
+    LEFT JOIN users u ON c.criador_id = u.id_users
+    ORDER BY c.verificada ASC, c.criada_em ASC
+  `;
+  db.query(sql, (err, results) => {
+    if (err) {
+      console.error("Erro ao obter comunidades:", err);
+      return res.status(500).json({ erro: "Erro ao obter comunidades" });
+    }
+    res.json(results || []);
+  });
+});
+
 // GET /api/admin/comunidades/pendentes - obter comunidades não verificadas
 app.get("/api/admin/comunidades/pendentes", (req, res) => {
   const sql = `
@@ -2436,17 +2454,21 @@ app.get("/api/ai/report/:userId", limiterAI, async (req, res) => {
   const temPlano = userRow.plano === "pago" && (!userRow.plano_ativo_ate || new Date(userRow.plano_ativo_ate) > agora);
   if (!temPlano) return res.status(403).json({ erro: "Plano GoLift Pro necessário", codigo: "PLANO_NECESSARIO" });
 
-  // Calcular semana passada (segunda-feira anterior)
+  // Calcular semana passada (segunda-feira a domingo)
   const hoje = new Date();
   const diaSemana = hoje.getDay(); // 0=Dom, 1=Seg...
+  // Dias desde a segunda-feira desta semana
   const diasDesdeSegunda = diaSemana === 0 ? 6 : diaSemana - 1;
+  // Segunda da semana passada
   const segundaPassada = new Date(hoje);
   segundaPassada.setDate(hoje.getDate() - diasDesdeSegunda - 7);
   segundaPassada.setHours(0, 0, 0, 0);
+  // Domingo da semana passada (6 dias depois da segunda)
   const domingoPassado = new Date(segundaPassada);
   domingoPassado.setDate(segundaPassada.getDate() + 6);
   domingoPassado.setHours(23, 59, 59, 999);
   const semanaInicio = segundaPassada.toISOString().split("T")[0];
+  console.log(`[AI report] Semana passada: ${semanaInicio} a ${domingoPassado.toISOString().split('T')[0]}, userId=${userId}`);
 
   // Verificar cache
   const cached = await new Promise((resolve) => {
@@ -2464,7 +2486,7 @@ app.get("/api/ai/report/:userId", limiterAI, async (req, res) => {
   // Recolher dados da semana passada
   const treinos = await new Promise((resolve) => {
     db.query(
-      `SELECT ts.id_sessao, ts.data_inicio, ts.duracao_segundos,
+      `SELECT ts.id_sessao, ts.data_fim AS data_inicio, ts.duracao_segundos,
               t.nome AS nome_treino,
               GROUP_CONCAT(DISTINCT e.grupo_tipo ORDER BY e.grupo_tipo SEPARATOR ', ') AS musculos,
               COUNT(DISTINCT te.id_exercicio) AS num_exercicios,
@@ -2472,12 +2494,12 @@ app.get("/api/ai/report/:userId", limiterAI, async (req, res) => {
        FROM treino_sessao ts
        JOIN treino t ON ts.id_treino = t.id_treino
        LEFT JOIN treino_exercicio te ON te.id_treino = t.id_treino
-       LEFT JOIN exercicios e ON e.id = te.id_exercicio
+       LEFT JOIN exercicios e ON e.id_exercicio = te.id_exercicio
        LEFT JOIN treino_serie tse ON tse.id_sessao = ts.id_sessao AND tse.id_exercicio = te.id_exercicio
-       WHERE ts.id_user = ? AND ts.data_inicio BETWEEN ? AND ? AND ts.concluido = 1
-       GROUP BY ts.id_sessao, ts.data_inicio, ts.duracao_segundos, t.nome`,
+       WHERE ts.id_users = ? AND ts.data_fim BETWEEN ? AND ? AND ts.data_fim IS NOT NULL
+       GROUP BY ts.id_sessao, ts.data_fim, ts.duracao_segundos, t.nome`,
       [userId, segundaPassada, domingoPassado],
-      (err, rows) => resolve(err ? [] : rows)
+      (err, rows) => { if (err) { console.error('[AI report] Query err:', err.message); return resolve([]); } resolve(rows); }
     );
   });
 
