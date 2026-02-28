@@ -19,7 +19,7 @@ require('dotenv').config();
 
 
 
-const os = require('os');
+
 
 // --- Segurança: JWT_SECRET obrigatório ---
 if (!process.env.JWT_SECRET || process.env.JWT_SECRET === 'golift_super_secret') {
