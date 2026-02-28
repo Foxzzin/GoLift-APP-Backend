@@ -26,7 +26,7 @@ app.use('/api', authRoutes)
 const userRoutes = require('./routes/user.routes')
 app.use('/api/user', userRoutes)
 // Modular route imports (clean, professional)
-const utilsRoutes = require('./routes/utils/utils.routes');
+// ...existing code...
 // Modular route imports (clean, professional)
 const utilsRoutes = require('./routes/utils/utils.routes');
 const recordesRoutes = require('./routes/recordes/recordes.routes');
