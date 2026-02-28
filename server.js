@@ -23,7 +23,7 @@ if (!process.env.JWT_SECRET || process.env.JWT_SECRET === 'golift_super_secret')
 
 // ...existing code...
 // Initialize express app and middleware
-const express = require('express');
+
 const cors = require('cors');
 const helmet = require('helmet');
 const app = express();
