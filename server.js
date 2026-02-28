@@ -1,4 +1,23 @@
 
+const fetch = require("node-fetch");
+const GORQ_API_KEY = process.env.GORQ_API_KEY ;
+const GORQ_BASE_URL = "https://api.gorq.ai/v1";
+// server.js — Clean, modular, professional
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const helmet = require('helmet');
+const app = express();
+const http = require('http');
+const os = require('os');
+
+// --- Segurança: JWT_SECRET obrigatório ---
+if (!process.env.JWT_SECRET || process.env.JWT_SECRET === 'golift_super_secret') {
+  console.error('[SECURITY] JWT_SECRET não definido ou inseguro. Define JWT_SECRET nas variáveis de ambiente.');
+  process.exit(1);
+}
+
+// Modular route imports (after app is initialized)
 const recordesRoutes = require('./routes/recordes/recordes.routes');
 const sessoesRoutes = require('./routes/sessoes/sessoes.routes');
 const utilsRoutes = require('./routes/utils/utils.routes');
@@ -10,22 +29,6 @@ const treinoRoutes = require('./routes/treino/treino.routes');
 const authRoutes = require('./routes/auth/auth.routes');
 const userRoutes = require('./routes/user/user.routes');
 const adminRoutes = require('./routes/admin/admin.routes');
-const fetch = require("node-fetch");
-const GORQ_API_KEY = process.env.GORQ_API_KEY ;
-const GORQ_BASE_URL = "https://api.gorq.ai/v1";
-// server.js — Clean, modular, professional
-require('dotenv').config();
-
-
-
-
-
-
-// --- Segurança: JWT_SECRET obrigatório ---
-if (!process.env.JWT_SECRET || process.env.JWT_SECRET === 'golift_super_secret') {
-  console.error('[SECURITY] JWT_SECRET não definido ou inseguro. Define JWT_SECRET nas variáveis de ambiente.');
-  process.exit(1);
-}
 
 // Register routes after app is initialized
 app.use('/api', utilsRoutes);
