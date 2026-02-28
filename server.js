@@ -45,18 +45,7 @@ const emailTransporter = nodemailer.createTransport({
 });
 
 // ================== AI (Gorq) ==================
-// Integração com Gorq será adicionada abaixo
-      if (is429 && !quotaZero && attempt < retries) {
-        const delay = (attempt + 1) * 10000;
-        console.warn(`[Gemini] 429 - aguardar ${delay / 1000}s (tentativa ${attempt + 1}/${retries})`);
-        await new Promise(r => setTimeout(r, delay));
-        continue;
-      }
-      // Se quota = 0 ou esgotou retries, lançar para o caller tratar
-      throw err;
-    }
-  }
-}
+//
 
 // ================== STRIPE ==================
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
