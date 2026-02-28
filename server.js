@@ -20,6 +20,18 @@ if (!process.env.JWT_SECRET || process.env.JWT_SECRET === 'golift_super_secret')
 
 
 
+
+// ...existing code...
+// Initialize express app and middleware
+const express = require('express');
+const cors = require('cors');
+const helmet = require('helmet');
+const app = express();
+const http = require('http');
+const os = require('os');
+
+// ...existing code...
+
 // Modular route imports (after app is initialized)
 const recordesRoutes = require('./routes/recordes/recordes.routes');
 const sessoesRoutes = require('./routes/sessoes/sessoes.routes');
@@ -45,6 +57,7 @@ app.use('/api/treinos', treinoRoutes);
 app.use('/api', authRoutes);
 app.use('/api/user', userRoutes);
 app.use('/api/admin', adminRoutes);
+// ...existing code...
 
 async function gorqGenerate({ prompt, type = "plan", diasPorSemana = 4 }) {
   const endpoint = type === "plan" ? "/plan" : "/report";
