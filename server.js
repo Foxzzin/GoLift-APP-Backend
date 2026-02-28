@@ -235,7 +235,7 @@ app.post("/api/login", (req, res) => {
         email: user.email,
         tipo: user.id_tipoUser
       };
-      const token = jwt.sign(payload, process.env.JWT_SECRET || "golift_super_secret", { expiresIn: "24h" });
+      const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: "24h" });
       res.json({
         sucesso: true,
         token,
