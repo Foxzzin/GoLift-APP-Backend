@@ -1,36 +1,10 @@
-// Rotas Recordes modulares
-const recordesRoutes = require('./routes/recordes.routes')
-app.use('/api/recordes', recordesRoutes)
-// Rotas Sessões modulares
-const sessoesRoutes = require('./routes/sessoes.routes')
-app.use('/api/sessoes', sessoesRoutes)
-// Rotas Plano modulares
-const planoRoutes = require('./routes/plano.routes')
-app.use('/api/plano', planoRoutes)
-// Rotas AI modulares
-const aiRoutes = require('./routes/ai.routes')
-app.use('/api/ai', aiRoutes)
-// Rotas Stripe/pagamentos modulares
-const stripeRoutes = require('./routes/stripe.routes')
-app.use('/api/stripe', stripeRoutes)
-// Rotas comunidade modulares
-const comunidadeRoutes = require('./routes/comunidade.routes')
-app.use('/api/comunidades', comunidadeRoutes)
-// Rotas treino modulares
-const treinoRoutes = require('./routes/treino.routes')
-app.use('/api/treinos', treinoRoutes)
-// Rotas auth modulares
-const authRoutes = require('./routes/auth.routes')
-app.use('/api', authRoutes)
-// Rotas user modulares
-const userRoutes = require('./routes/user.routes')
-app.use('/api/user', userRoutes)
+// ...existing code...
 // Modular route imports (clean, professional)
 // ...existing code...
 // Modular route imports (clean, professional)
 const utilsRoutes = require('./routes/utils/utils.routes');
 // ...existing code...
-const sessoesRoutes = require('./routes/sessoes/sessoes.routes');
+// ...existing code...
 const planoRoutes = require('./routes/plano/plano.routes');
 const aiRoutes = require('./routes/ai/ai.routes');
 const stripeRoutes = require('./routes/stripe/stripe.routes');
