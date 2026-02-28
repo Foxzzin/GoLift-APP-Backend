@@ -412,7 +412,12 @@ app.post("/api/register", async (req, res) => {
 
 // Rota para obter dados do perfil do utilizador
 app.get("/api/profile/:userId", authenticateJWT, (req, res) => {
+
   const { userId } = req.params;
+  // Só o próprio user ou admin pode aceder
+  if (parseInt(userId) !== req.user.id && req.user.tipo !== 1) {
+    return res.status(403).json({ erro: "Acesso negado." });
+  }
 
   const sql = `
     SELECT 
@@ -445,7 +450,11 @@ app.get("/api/profile/:userId", authenticateJWT, (req, res) => {
 // Rota para obter o streak de treinos do utilizador
 // Streak = dias CONSECUTIVOS com sessões concluídas (data_fim preenchida)
 app.get("/api/streak/:userId", authenticateJWT, (req, res) => {
+
   const { userId } = req.params;
+  if (parseInt(userId) !== req.user.id && req.user.tipo !== 1) {
+    return res.status(403).json({ erro: "Acesso negado." });
+  }
 
   // Obter datas únicas de sessões concluídas, ordenadas DESC
   const sql = `
@@ -727,7 +736,11 @@ app.post("/api/treino", authenticateJWT, (req, res) => {
 // ============================================
 // Get all workout sessions for a user (for metrics)
 app.get("/api/sessoes/:userId", authenticateJWT, (req, res) => {
+
   const { userId } = req.params;
+  if (parseInt(userId) !== req.user.id && req.user.tipo !== 1) {
+    return res.status(403).json({ erro: "Acesso negado." });
+  }
 
   const sql = `
     SELECT 
@@ -905,7 +918,11 @@ app.get("/api/treino-com-data/:userId", authenticateJWT, (req, res) => {
 
 // Get all workouts (treinos) for a user
 app.get("/api/treino/:userId", authenticateJWT, (req, res) => {
+
   const { userId } = req.params;
+  if (parseInt(userId) !== req.user.id && req.user.tipo !== 1) {
+    return res.status(403).json({ erro: "Acesso negado." });
+  }
 
   console.log(`👤 Carregando treinos do utilizador ID: ${userId}`);
 
@@ -1414,7 +1431,11 @@ app.get("/api/treino-sessao-detalhes/:sessaoId", authenticateJWT, (req, res) => 
 
 // Get personal records (recordes pessoais) for a user
 app.get("/api/recordes/:userId", authenticateJWT, (req, res) => {
+
   const { userId } = req.params;
+  if (parseInt(userId) !== req.user.id && req.user.tipo !== 1) {
+    return res.status(403).json({ erro: "Acesso negado." });
+  }
   
   const sql = `
     SELECT 
