@@ -29,7 +29,7 @@ app.use('/api/user', userRoutes)
 // ...existing code...
 // Modular route imports (clean, professional)
 const utilsRoutes = require('./routes/utils/utils.routes');
-const recordesRoutes = require('./routes/recordes/recordes.routes');
+// ...existing code...
 const sessoesRoutes = require('./routes/sessoes/sessoes.routes');
 const planoRoutes = require('./routes/plano/plano.routes');
 const aiRoutes = require('./routes/ai/ai.routes');
