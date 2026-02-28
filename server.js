@@ -1,3 +1,25 @@
+const fetch = require("node-fetch");
+const GORQ_API_KEY = process.env.GORQ_API_KEY ;
+const GORQ_BASE_URL = "https://api.gorq.ai/v1";
+
+async function gorqGenerate({ prompt, type = "plan", diasPorSemana = 4 }) {
+  const endpoint = type === "plan" ? "/plan" : "/report";
+  const url = GORQ_BASE_URL + endpoint;
+  const body = {
+    prompt,
+    diasPorSemana,
+  };
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${GORQ_API_KEY}`,
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`[GORQ] ${res.status} ${res.statusText}`);
+  return res.json();
+}
 // server.js
 require("dotenv").config();
 const express = require("express");
@@ -9,7 +31,7 @@ const jwt = require("jsonwebtoken");
 const { authenticateJWT } = require("./middleware/auth.middleware");
 const http = require("http");
 const nodemailer = require("nodemailer");
-const { GoogleGenerativeAI } = require("@google/generative-ai");
+// const { GoogleGenerativeAI } = require("@google/generative-ai");
 const Stripe = require("stripe");
 const rateLimit = require("express-rate-limit");
 
@@ -22,82 +44,8 @@ const emailTransporter = nodemailer.createTransport({
   },
 });
 
-// ================== GEMINI AI ==================
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
-const geminiModel = genAI.getGenerativeModel({ model: "gemini-2.0-flash-lite" });
-
-// Mock fallbacks para quando a quota Gemini está esgotada (desenvolvimento)
-const MOCK_RELATORIO = {
-  avaliacao: "Boa semana de treinos! Mantiveste consistência e isso é o mais importante para atingir os teus objetivos.",
-  equilibrio: "O equilíbrio muscular está razoável, mas podes beneficiar de incluir mais trabalho de costas para contrabalançar o treino de peito.",
-  progressao: "Notou-se uma ligeira progressão nas cargas comparando com semanas anteriores. Continua a aumentar 2.5kg por semana quando possível.",
-  descanso: "Os dias de descanso entre sessões parecem adequados. Lembra-te de dormir pelo menos 7-8 horas para a recuperação muscular.",
-  melhorias: [
-    "Adiciona um exercício de mobilidade antes de cada treino",
-    "Aumenta a ingestão de proteína para apoiar a recuperação muscular",
-    "Regista as cargas em cada série para acompanhar melhor a progressão"
-  ]
-};
-
-const MOCK_PLANO = {
-  descricao: "Programa de hipertrofia baseado em divisão Push/Pull/Legs, ideal para 4 dias por semana com foco em progressão de carga.",
-  split: [
-    {
-      dia: "Segunda-feira",
-      foco: "Peito e Tríceps (Push)",
-      exercicios: [
-        { nome: "Supino plano com barra", series: 4, repeticoes: "8-10", observacao: "Foco na descida controlada" },
-        { nome: "Supino inclinado com halteres", series: 3, repeticoes: "10-12", observacao: "" },
-        { nome: "Crucifixo na polia", series: 3, repeticoes: "12-15", observacao: "Contração máxima no topo" },
-        { nome: "Tríceps na polia (corda)", series: 3, repeticoes: "12-15", observacao: "" },
-        { nome: "Mergulho entre bancos", series: 3, repeticoes: "10-12", observacao: "" }
-      ]
-    },
-    {
-      dia: "Terça-feira",
-      foco: "Costas e Bíceps (Pull)",
-      exercicios: [
-        { nome: "Puxada na polia alta", series: 4, repeticoes: "8-10", observacao: "Peito para fora, omoplatas juntas" },
-        { nome: "Remada curvada com barra", series: 4, repeticoes: "8-10", observacao: "" },
-        { nome: "Remada baixa na polia", series: 3, repeticoes: "10-12", observacao: "" },
-        { nome: "Curl com barra", series: 3, repeticoes: "10-12", observacao: "" },
-        { nome: "Curl martelo com halteres", series: 3, repeticoes: "12-15", observacao: "" }
-      ]
-    },
-    {
-      dia: "Quinta-feira",
-      foco: "Pernas (Quadríceps)",
-      exercicios: [
-        { nome: "Agachamento livre com barra", series: 4, repeticoes: "6-8", observacao: "Profundidade paralela ao chão" },
-        { nome: "Leg press 45°", series: 4, repeticoes: "10-12", observacao: "" },
-        { nome: "Extensão de pernas na máquina", series: 3, repeticoes: "12-15", observacao: "" },
-        { nome: "Afundos com halteres", series: 3, repeticoes: "10 cada perna", observacao: "" },
-        { nome: "Panturrilhas em pé", series: 4, repeticoes: "15-20", observacao: "" }
-      ]
-    },
-    {
-      dia: "Sexta-feira",
-      foco: "Ombros e Posterior da Coxa",
-      exercicios: [
-        { nome: "Desenvolvimento com barra", series: 4, repeticoes: "8-10", observacao: "" },
-        { nome: "Elevação lateral com halteres", series: 4, repeticoes: "12-15", observacao: "Cotovelos ligeiramente dobrados" },
-        { nome: "Pássaro (elevação posterior)", series: 3, repeticoes: "12-15", observacao: "" },
-        { nome: "Peso morto romeno", series: 4, repeticoes: "8-10", observacao: "Barra junto ao corpo" },
-        { nome: "Curl femoral deitado", series: 3, repeticoes: "12-15", observacao: "" }
-      ]
-    }
-  ]
-};
-
-// Wrapper com retry e fallback mock para erros de quota Gemini
-async function geminiGenerate(prompt, retries = 1) {
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    try {
-      const result = await geminiModel.generateContent(prompt);
-      return result.response.text();
-    } catch (err) {
-      const is429 = err?.message?.includes("429") || err?.message?.includes("Too Many Requests");
-      const quotaZero = err?.message?.includes("limit: 0");
+// ================== AI (Gorq) ==================
+// Integração com Gorq será adicionada abaixo
       if (is429 && !quotaZero && attempt < retries) {
         const delay = (attempt + 1) * 10000;
         console.warn(`[Gemini] 429 - aguardar ${delay / 1000}s (tentativa ${attempt + 1}/${retries})`);
@@ -1447,7 +1395,7 @@ app.get("/api/recordes/:userId", authenticateJWT, (req, res) => {
     INNER JOIN exercicios e ON ts.id_exercicio = e.id_exercicio
     WHERE sess.id_users = ? AND ts.peso > 0
     GROUP BY ts.id_exercicio, e.nome
-    ORDER BY ts.peso DESC
+    ORDER BY MAX(ts.peso) DESC
     LIMIT 20
   `;
 
@@ -2596,31 +2544,17 @@ Responde APENAS com JSON válido (sem markdown, sem código blocks) com exatamen
 }`;
 
   try {
-    const rawText = await geminiGenerate(prompt);
-    const text = rawText.trim().replace(/```json\n?|\n?```/g, "");
-    const relatorio = JSON.parse(text);
-
-    // Guardar cache
+    const gorqResp = await gorqGenerate({ prompt, type: "report" });
+    const relatorio = gorqResp.relatorio || gorqResp;
     db.query(
       "INSERT INTO ai_reports (user_id, semana_inicio, conteudo) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE conteudo = VALUES(conteudo)",
       [userId, semanaInicio, JSON.stringify(relatorio)]
     );
-
-    console.log(`[AI] Relatório gerado para user ${userId} semana ${semanaInicio}`);
+    console.log(`[AI][GORQ] Relatório gerado para user ${userId} semana ${semanaInicio}`);
     res.json({ sucesso: true, relatorio, semana_inicio: semanaInicio, cached: false });
   } catch (err) {
-    console.error("[AI] Erro ao gerar relatório:", err.message);
-    const is429 = err?.message?.includes("429");
-    if (is429) {
-      // Fallback mock para desenvolvimento quando quota esgotada
-      console.warn("[AI] A usar relatório mock por quota esgotada");
-      db.query(
-        "INSERT INTO ai_reports (user_id, semana_inicio, conteudo) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE conteudo = VALUES(conteudo)",
-        [userId, semanaInicio, JSON.stringify(MOCK_RELATORIO)]
-      );
-      return res.json({ sucesso: true, relatorio: MOCK_RELATORIO, semana_inicio: semanaInicio, cached: false, mock: true });
-    }
-    res.status(500).json({ erro: "Erro ao gerar relatório. Tenta mais tarde." });
+    console.error("[AI][GORQ] Erro ao gerar relatório:", err.message);
+    res.status(500).json({ erro: "Erro ao gerar relatório com Gorq." });
   }
 });
 
@@ -2707,36 +2641,20 @@ Responde APENAS com JSON válido (sem markdown, sem código blocks) com exatamen
 Inclui apenas os ${diasPorSemana} dias de treino (sem dias de descanso no array).`;
 
   try {
-    const rawText = await geminiGenerate(prompt);
-    const text = rawText.trim().replace(/```json\n?|\n?```/g, "");
-    const plano = JSON.parse(text);
-
+    const gorqResp = await gorqGenerate({ prompt, type: "plan", diasPorSemana });
+    const plano = gorqResp.plano || gorqResp;
     db.query(
       "INSERT INTO ai_planos (user_id, mes, conteudo) VALUES (?, ?, ?)",
       [userId, mesAtual, JSON.stringify(plano)],
       (err) => {
-        if (err) { console.error("[AI] Erro ao guardar plano:", err); return res.status(500).json({ erro: "Erro ao guardar plano" }); }
-        console.log(`[AI] Plano gerado para user ${userId} mês ${mesAtual}`);
+        if (err) { console.error("[AI][GORQ] Erro ao guardar plano:", err); return res.status(500).json({ erro: "Erro ao guardar plano" }); }
+        console.log(`[AI][GORQ] Plano gerado para user ${userId} mês ${mesAtual}`);
         res.json({ sucesso: true, plano, mes: mesAtual, pode_gerar: false });
       }
     );
   } catch (err) {
-    console.error("[AI] Erro ao gerar plano:", err.message);
-    const is429 = err?.message?.includes("429");
-    if (is429) {
-      // Fallback mock para desenvolvimento quando quota esgotada
-      console.warn("[AI] A usar plano mock por quota esgotada");
-      db.query(
-        "INSERT INTO ai_planos (user_id, mes, conteudo) VALUES (?, ?, ?)",
-        [userId, mesAtual, JSON.stringify(MOCK_PLANO)],
-        (dbErr) => {
-          if (dbErr) console.error("[AI] Erro ao guardar plano mock:", dbErr.message);
-          res.json({ sucesso: true, plano: MOCK_PLANO, mes: mesAtual, pode_gerar: false, mock: true });
-        }
-      );
-      return;
-    }
-    res.status(500).json({ erro: "Erro ao gerar plano. Tenta mais tarde." });
+    console.error("[AI][GORQ] Erro ao gerar plano:", err.message);
+    res.status(500).json({ erro: "Erro ao gerar plano com Gorq." });
   }
 });
 

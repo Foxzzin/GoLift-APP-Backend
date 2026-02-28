@@ -1,24 +1,29 @@
 // db.js
-require("dotenv").config();
+require("dotenv").config({ path: require("path").join(__dirname, ".env") });
 const mysql = require("mysql2");
 
-const pool = mysql.createPool({
+const db = mysql.createConnection({
   host: process.env.DB_HOST || "127.0.0.1",
   user: process.env.DB_USER || "root",
   password: process.env.DB_PASS || "",
   database: process.env.DB_NAME || "golift",
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0,
+  connectTimeout: 10000,
+  enableKeepAlive: true
 });
 
-pool.getConnection((err, connection) => {
+db.connect((err) => {
   if (err) {
-    console.error("Erro ao ligar à BD:", err);
+    console.log("Erro ao ligar à BD:", err);
     return;
   }
-  console.log("Pool MySQL conectado!");
-  connection.release();
+  console.log("Ligado ao MySQL!");
 });
 
-module.exports = pool;
+db.on('error', function(err) {
+  console.log('Erro na BD:', err.code);
+  if(err.code === 'PROTOCOL_CONNECTION_LOST') { db.connect(); }
+  if(err.code === 'ER_CON_COUNT_ERROR') { db.connect(); }
+  if(err.code === 'ER_AUTH_PLUGIN_CANNOT_BE_LOADED') { db.connect(); }
+});
+
+module.exports = db;
