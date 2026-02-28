@@ -5,6 +5,8 @@ const cors = require("cors");
 const db = require("./db");
 const bcrypt = require("bcrypt");
 const os = require("os");
+const jwt = require("jsonwebtoken");
+const { authenticateJWT } = require("./middleware/auth.middleware");
 const http = require("http");
 const nodemailer = require("nodemailer");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
@@ -161,6 +163,7 @@ app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async
 
 app.use(cors());
 app.use(express.json());
+app.set("trust proxy", 1); // Necessário para req.protocol funcionar atrás de Nginx/proxy
 
 // ================== RATE LIMITING ==================
 const limiterGeral = rateLimit({
@@ -325,39 +328,52 @@ app.get("/api/health", (req, res) => {
 app.post("/api/login", (req, res) => {
   const { email, password } = req.body;
 
-  if (!email || !password) {
+
+  // Validar que email e password são strings (evita injeções com objetos como { $gt: "" })
+  if (!email || !password || typeof email !== "string" || typeof password !== "string") {
     return res.status(400).json({ erro: "Email e password são obrigatórios." });
   }
 
   const sql = "SELECT * FROM users WHERE email = ? LIMIT 1";
 
-  db.query(sql, [email], async (err, rows) => {
+  db.query(sql, [email.trim()], async (err, rows) => {
     if (err) {
       console.error("❌ [LOGIN] Erro na BD:", err);
       return res.status(500).json({ erro: "Erro na base de dados." });
     }
 
     if (rows.length === 0) {
-      return res.status(401).json({ erro: "Email não encontrado." });
+      return res.status(401).json({ erro: "Credenciais inválidas." });
     }
 
     const user = rows[0];
+
+    // Guard: password pode ser null para contas sem password definida
+    if (!user.password || typeof user.password !== "string") {
+      return res.status(401).json({ erro: "Credenciais inválidas." });
+    }
 
     // Verificar password encriptada
     try {
       const passwordCorreta = await bcrypt.compare(password, user.password);
       
       if (!passwordCorreta) {
-        return res.status(401).json({ erro: "Credenciais inválidas2." });
+        return res.status(401).json({ erro: "Credenciais inválidas." });
       }
 
       // Login correcto
-      res.json({
-        sucesso: true,
+      // Gerar JWT
+      const payload = {
         id: user.id_users,
         nome: user.userName,
         email: user.email,
         tipo: user.id_tipoUser
+      };
+      const token = jwt.sign(payload, process.env.JWT_SECRET || "golift_super_secret", { expiresIn: "24h" });
+      res.json({
+        sucesso: true,
+        token,
+        user: payload
       });
     } catch (bcryptError) {
       console.error("❌ [LOGIN] Erro ao comparar password:", bcryptError);
@@ -395,7 +411,7 @@ app.post("/api/register", async (req, res) => {
 // server.js - ADICIONA ESTAS ROTAS AO TEU SERVIDOR
 
 // Rota para obter dados do perfil do utilizador
-app.get("/api/profile/:userId", (req, res) => {
+app.get("/api/profile/:userId", authenticateJWT, (req, res) => {
   const { userId } = req.params;
 
   const sql = `
@@ -428,7 +444,7 @@ app.get("/api/profile/:userId", (req, res) => {
 
 // Rota para obter o streak de treinos do utilizador
 // Streak = dias CONSECUTIVOS com sessões concluídas (data_fim preenchida)
-app.get("/api/streak/:userId", (req, res) => {
+app.get("/api/streak/:userId", authenticateJWT, (req, res) => {
   const { userId } = req.params;
 
   // Obter datas únicas de sessões concluídas, ordenadas DESC
@@ -486,7 +502,7 @@ app.get("/api/streak/:userId", (req, res) => {
 // ---------- Admin API routes ----------
 
 // Get basic stats for admin dashboard
-app.get("/api/admin/stats", (req, res) => {
+app.get("/api/admin/stats", authenticateJWT, (req, res) => {
   const stats = {};
 
   db.query("SELECT COUNT(*) as totalUsers FROM users", (err, rows) => {
@@ -513,7 +529,7 @@ app.get("/api/admin/stats", (req, res) => {
 });
 
 // Get list of users for admin
-app.get("/api/admin/users", (req, res) => {
+app.get("/api/admin/users", authenticateJWT, (req, res) => {
   // Return full user info (excluding password) for admin UI, including created_at
   const sql = `SELECT id_users as id, userName, email, idade, peso, altura, id_tipoUser, created_at FROM users ORDER BY id_users DESC`;
   db.query(sql, (err, rows) => {
@@ -526,7 +542,7 @@ app.get("/api/admin/users", (req, res) => {
 });
 
 // Update user (admin)
-app.put("/api/admin/users/:id", (req, res) => {
+app.put("/api/admin/users/:id", authenticateJWT, (req, res) => {
   const { id } = req.params;
   const { userName, email, idade, peso, altura, id_tipoUser } = req.body;
 
@@ -541,7 +557,7 @@ app.put("/api/admin/users/:id", (req, res) => {
 });
 
 // Delete user (admin)
-app.delete("/api/admin/users/:id", (req, res) => {
+app.delete("/api/admin/users/:id", authenticateJWT, (req, res) => {
   const { id } = req.params;
   db.query("DELETE FROM users WHERE id_users = ?", [id], (err, result) => {
     if (err) {
@@ -553,7 +569,7 @@ app.delete("/api/admin/users/:id", (req, res) => {
 });
 
 // Get exercises (admin)
-app.get("/api/admin/exercicios", (req, res) => {
+app.get("/api/admin/exercicios", authenticateJWT, (req, res) => {
   const sql = "SELECT id_exercicio as id, nome, descricao, video, recorde_pessoal as recorde_pessoal, grupo_tipo, sub_tipo FROM exercicios ORDER BY nome ASC";
   db.query(sql, (err, rows) => {
     if (err) {
@@ -565,7 +581,7 @@ app.get("/api/admin/exercicios", (req, res) => {
 });
 
 // Add new exercise (admin)
-app.post("/api/admin/exercicios", (req, res) => {
+app.post("/api/admin/exercicios", authenticateJWT, (req, res) => {
   const { nome, descricao, video, recorde_pessoal, grupo_tipo, sub_tipo } = req.body;
   if (!nome) return res.status(400).json({ erro: "Nome do exercício é obrigatório." });
 
@@ -587,7 +603,7 @@ app.post("/api/admin/exercicios", (req, res) => {
 });
 
 // Delete exercise (admin) by name
-app.delete("/api/admin/exercicios/:nome", (req, res) => {
+app.delete("/api/admin/exercicios/:nome", authenticateJWT, (req, res) => {
   const { nome } = req.params;
   db.query("DELETE FROM exercicios WHERE nome = ?", [nome], (err, result) => {
     if (err) {
@@ -601,7 +617,7 @@ app.delete("/api/admin/exercicios/:nome", (req, res) => {
 // ---------- User API routes for workouts ----------
 
 // Get all available exercises for users
-app.get("/api/exercicios", (req, res) => {
+app.get("/api/exercicios", authenticateJWT, (req, res) => {
   // Verificar se a conexão à BD está ativa
   if (!db) {
     return res.status(500).json({ 
@@ -629,7 +645,7 @@ app.get("/api/exercicios", (req, res) => {
 });
 
 // Create a new workout (treino) for a user
-app.post("/api/treino", (req, res) => {
+app.post("/api/treino", authenticateJWT, (req, res) => {
   const { userId, nome, exercicios, dataRealizacao } = req.body;
 
   if (!userId || !nome || !exercicios || !Array.isArray(exercicios) || exercicios.length === 0) {
@@ -710,7 +726,7 @@ app.post("/api/treino", (req, res) => {
 // SESSÕES - Deve vir ANTES de /api/treino/:userId
 // ============================================
 // Get all workout sessions for a user (for metrics)
-app.get("/api/sessoes/:userId", (req, res) => {
+app.get("/api/sessoes/:userId", authenticateJWT, (req, res) => {
   const { userId } = req.params;
 
   const sql = `
@@ -762,7 +778,7 @@ app.get("/api/sessoes/:userId", (req, res) => {
 });
 
 // Get workout session details with exercises and records broken
-app.get("/api/sessao/detalhes/:sessaoId", (req, res) => {
+app.get("/api/sessao/detalhes/:sessaoId", authenticateJWT, (req, res) => {
   const { sessaoId } = req.params;
 
   // Buscar tudo em uma única query otimizada com JOINs
@@ -848,7 +864,7 @@ app.get("/api/sessao/detalhes/:sessaoId", (req, res) => {
 });
 
 // NOVA ROTA: Retorna treinos com datas da tabela treino (não apenas sessões completadas)
-app.get("/api/treino-com-data/:userId", (req, res) => {
+app.get("/api/treino-com-data/:userId", authenticateJWT, (req, res) => {
   const { userId } = req.params;
 
   const sql = `
@@ -888,7 +904,7 @@ app.get("/api/treino-com-data/:userId", (req, res) => {
 });
 
 // Get all workouts (treinos) for a user
-app.get("/api/treino/:userId", (req, res) => {
+app.get("/api/treino/:userId", authenticateJWT, (req, res) => {
   const { userId } = req.params;
 
   console.log(`👤 Carregando treinos do utilizador ID: ${userId}`);
@@ -1087,7 +1103,7 @@ app.get("/api/treino/sessao/:sessaoId", (req, res) => {
 });
 
 // Get workout details with exercises
-app.get("/api/treino/:userId/:treinoId", (req, res) => {
+app.get("/api/treino/:userId/:treinoId", authenticateJWT, (req, res) => {
   const { userId, treinoId } = req.params;
 
   // Verificar se o treino pertence ao utilizador
@@ -1134,7 +1150,7 @@ app.get("/api/treino/:userId/:treinoId", (req, res) => {
 });
 
 // Update workout (treino) - Editar nome e exercícios
-app.put("/api/treino/:userId/:treinoId", (req, res) => {
+app.put("/api/treino/:userId/:treinoId", authenticateJWT, (req, res) => {
   const { userId, treinoId } = req.params;
   const { nome, exercicios } = req.body;
 
@@ -1204,7 +1220,7 @@ app.put("/api/treino/:userId/:treinoId", (req, res) => {
 });
 
 // Delete workout (treino)
-app.delete("/api/treino/:userId/:treinoId", (req, res) => {
+app.delete("/api/treino/:userId/:treinoId", authenticateJWT, (req, res) => {
   const { userId, treinoId } = req.params;
 
   // Verificar se o treino pertence ao utilizador
@@ -1272,7 +1288,7 @@ app.delete("/api/treino/:userId/:treinoId", (req, res) => {
 });
 
 // Save complete workout session in a single request
-app.post("/api/treino/sessao/guardar", (req, res) => {
+app.post("/api/treino/sessao/guardar", authenticateJWT, (req, res) => {
   const { userId, treinoId, duracao_segundos, series } = req.body;
 
   if (!userId || !treinoId || !series || !Array.isArray(series) || series.length === 0) {
@@ -1321,7 +1337,7 @@ app.post("/api/treino/sessao/guardar", (req, res) => {
 // (endpoints legacy /iniciar /serie /finalizar /cancelar removidos — substituídos por /api/treino/sessao/guardar)
 
 // Get full workout details with exercises, series, weight and reps
-app.get("/api/treino-sessao-detalhes/:sessaoId", (req, res) => {
+app.get("/api/treino-sessao-detalhes/:sessaoId", authenticateJWT, (req, res) => {
   const { sessaoId } = req.params;
 
   const sql = `
@@ -1397,7 +1413,7 @@ app.get("/api/treino-sessao-detalhes/:sessaoId", (req, res) => {
 });
 
 // Get personal records (recordes pessoais) for a user
-app.get("/api/recordes/:userId", (req, res) => {
+app.get("/api/recordes/:userId", authenticateJWT, (req, res) => {
   const { userId } = req.params;
   
   const sql = `
@@ -1424,7 +1440,7 @@ app.get("/api/recordes/:userId", (req, res) => {
 });
 
 // Get workout details with series
-app.get("/api/treino/detalhes/:treinoId/:dataIso", (req, res) => {
+app.get("/api/treino/detalhes/:treinoId/:dataIso", authenticateJWT, (req, res) => {
   const { treinoId, dataIso } = req.params;
 
   // Buscar informações do treino
@@ -1539,7 +1555,7 @@ app.get("/api/treino/detalhes/:treinoId/:dataIso", (req, res) => {
 // ============ ROTAS DE TREINOS PARA ADMINS ============
 
 // GET - Obter todos os treinos de admin
-app.get("/api/treino-admin", (req, res) => {
+app.get("/api/treino-admin", authenticateJWT, (req, res) => {
   const sql = `
     SELECT ta.id_treino_admin, ta.nome, ta.criado_em
     FROM treino_admin ta
@@ -1596,7 +1612,7 @@ app.get("/api/treino-admin", (req, res) => {
 });
 
 // Alias para /api/treinos-admin (com 's')
-app.get("/api/treinos-admin", (req, res) => {
+app.get("/api/treinos-admin", authenticateJWT, (req, res) => {
   const sql = `
     SELECT ta.id_treino_admin, ta.nome, ta.criado_em
     FROM treino_admin ta
@@ -1644,7 +1660,7 @@ app.get("/api/treinos-admin", (req, res) => {
 });
 
 // GET - Obter detalhes de um treino de admin específico
-app.get("/api/treino-admin/:id", (req, res) => {
+app.get("/api/treino-admin/:id", authenticateJWT, (req, res) => {
   const { id } = req.params;
 
   const sql = `
@@ -1693,7 +1709,7 @@ app.get("/api/treino-admin/:id", (req, res) => {
 });
 
 // POST - Criar novo treino de admin
-app.post("/api/treino-admin", (req, res) => {
+app.post("/api/treino-admin", authenticateJWT, (req, res) => {
   const { nome, exercicios } = req.body;
 
   if (!nome || !Array.isArray(exercicios) || exercicios.length === 0) {
@@ -1752,7 +1768,7 @@ app.post("/api/treino-admin", (req, res) => {
 });
 
 // PUT - Atualizar treino de admin
-app.put("/api/treino-admin/:id", (req, res) => {
+app.put("/api/treino-admin/:id", authenticateJWT, (req, res) => {
   const { id } = req.params;
   const { nome, exercicios } = req.body;
 
@@ -1825,7 +1841,7 @@ app.put("/api/treino-admin/:id", (req, res) => {
 });
 
 // DELETE - Apagar treino de admin
-app.delete("/api/treino-admin/:id", (req, res) => {
+app.delete("/api/treino-admin/:id", authenticateJWT, (req, res) => {
   const { id } = req.params;
 
   const sqlDelete = "DELETE FROM treino_admin WHERE id_treino_admin = ?";
@@ -2027,7 +2043,7 @@ app.delete('/api/treino-user/:treino_id/exercicios/:exercicio_id', (req, res) =>
 // ================== ENDPOINTS DE COMUNIDADES ==================
 
 // GET /api/comunidades - obter todas as comunidades verificadas
-app.get("/api/comunidades", (req, res) => {
+app.get("/api/comunidades", authenticateJWT, (req, res) => {
   const sql = `
     SELECT c.*, u.userName as criador_nome,
            (SELECT COUNT(*) FROM comunidade_membros WHERE comunidade_id = c.id) as membros
@@ -2047,7 +2063,7 @@ app.get("/api/comunidades", (req, res) => {
 });
 
 // GET /api/comunidades/user/:userId - obter comunidades do utilizador
-app.get("/api/comunidades/user/:userId", (req, res) => {
+app.get("/api/comunidades/user/:userId", authenticateJWT, (req, res) => {
   const { userId } = req.params;
   
   const sql = `
@@ -2070,7 +2086,7 @@ app.get("/api/comunidades/user/:userId", (req, res) => {
 });
 
 // POST /api/comunidades - criar comunidade
-app.post("/api/comunidades", (req, res) => {
+app.post("/api/comunidades", authenticateJWT, (req, res) => {
   const { nome, descricao, criador_id, pais, linguas, privada } = req.body;
   
   if (!nome || !descricao || !criador_id) {
@@ -2103,7 +2119,7 @@ app.post("/api/comunidades", (req, res) => {
 });
 
 // POST /api/comunidades/:id/join - entrar numa comunidade
-app.post("/api/comunidades/:id/join", (req, res) => {
+app.post("/api/comunidades/:id/join", authenticateJWT, (req, res) => {
   const { id } = req.params;
   const { userId } = req.body;
   
@@ -2126,7 +2142,7 @@ app.post("/api/comunidades/:id/join", (req, res) => {
 });
 
 // POST /api/comunidades/:id/leave - sair de uma comunidade
-app.post("/api/comunidades/:id/leave", (req, res) => {
+app.post("/api/comunidades/:id/leave", authenticateJWT, (req, res) => {
   const { id } = req.params;
   const { userId } = req.body;
   
@@ -2146,7 +2162,7 @@ app.post("/api/comunidades/:id/leave", (req, res) => {
 });
 
 // POST /api/comunidades/:id/mensagens - enviar mensagem
-app.post("/api/comunidades/:id/mensagens", (req, res) => {
+app.post("/api/comunidades/:id/mensagens", authenticateJWT, (req, res) => {
   const { id } = req.params;
   const { userId, mensagem } = req.body;
   
@@ -2170,7 +2186,7 @@ app.post("/api/comunidades/:id/mensagens", (req, res) => {
 });
 
 // GET /api/comunidades/:id/mensagens - obter mensagens
-app.get("/api/comunidades/:id/mensagens", (req, res) => {
+app.get("/api/comunidades/:id/mensagens", authenticateJWT, (req, res) => {
   const { id } = req.params;
   
   const sql = `
@@ -2191,7 +2207,7 @@ app.get("/api/comunidades/:id/mensagens", (req, res) => {
 });
 
 // GET /api/comunidades/:id/membros - obter membros
-app.get("/api/comunidades/:id/membros", (req, res) => {
+app.get("/api/comunidades/:id/membros", authenticateJWT, (req, res) => {
   const { id } = req.params;
   
   const sql = `
@@ -2214,7 +2230,7 @@ app.get("/api/comunidades/:id/membros", (req, res) => {
 // ================== ENDPOINTS DE ADMIN ==================
 
 // GET /api/admin/comunidades - obter todas as comunidades (verificadas + pendentes)
-app.get("/api/admin/comunidades", (req, res) => {
+app.get("/api/admin/comunidades", authenticateJWT, (req, res) => {
   const sql = `
     SELECT c.*, u.userName as criador_nome,
            (SELECT COUNT(*) FROM comunidade_membros WHERE comunidade_id = c.id) as membros
@@ -2232,7 +2248,7 @@ app.get("/api/admin/comunidades", (req, res) => {
 });
 
 // GET /api/admin/comunidades/pendentes - obter comunidades não verificadas
-app.get("/api/admin/comunidades/pendentes", (req, res) => {
+app.get("/api/admin/comunidades/pendentes", authenticateJWT, (req, res) => {
   const sql = `
     SELECT c.*, u.userName as criador_nome,
            (SELECT COUNT(*) FROM comunidade_membros WHERE comunidade_id = c.id) as membros
@@ -2252,7 +2268,7 @@ app.get("/api/admin/comunidades/pendentes", (req, res) => {
 });
 
 // POST /api/admin/comunidades/:id/verificar - verificar comunidade
-app.post("/api/admin/comunidades/:id/verificar", (req, res) => {
+app.post("/api/admin/comunidades/:id/verificar", authenticateJWT, (req, res) => {
   const { id } = req.params;
   
   const sql = "UPDATE comunidades SET verificada = 1 WHERE id = ?";
@@ -2267,7 +2283,7 @@ app.post("/api/admin/comunidades/:id/verificar", (req, res) => {
 });
 
 // POST /api/admin/comunidades/:id/rejeitar - rejeitar comunidade
-app.post("/api/admin/comunidades/:id/rejeitar", (req, res) => {
+app.post("/api/admin/comunidades/:id/rejeitar", authenticateJWT, (req, res) => {
   const { id } = req.params;
   
   const sql = "DELETE FROM comunidades WHERE id = ?";
@@ -2396,14 +2412,23 @@ app.post("/api/stripe/checkout-session", async (req, res) => {
   const { userId } = req.body;
   if (!userId) return res.status(400).json({ erro: "userId obrigatório" });
 
+  // Stripe exige URLs HTTPS válidas. Usa SERVER_URL do .env, ou deriva do pedido.
+  // exp:// e http:// locais não funcionam em produção com Stripe.
+  const baseUrl = process.env.SERVER_URL ||
+    (process.env.APP_URL && process.env.APP_URL.startsWith("https://")
+      ? process.env.APP_URL
+      : `${req.protocol}://${req.get("host")}`);
+
+  console.log("[Stripe] Base URL para redirect:", baseUrl);
+
   try {
     const session = await stripe.checkout.sessions.create({
       mode: "subscription",
       payment_method_types: ["card"],
       line_items: [{ price: process.env.STRIPE_PRICE_ID, quantity: 1 }],
       metadata: { userId: String(userId) },
-      success_url: `${process.env.APP_URL}?pagamento=sucesso`,
-      cancel_url: `${process.env.APP_URL}?pagamento=cancelado`,
+      success_url: `${baseUrl}/payment-return?status=sucesso`,
+      cancel_url: `${baseUrl}/payment-return?status=cancelado`,
     });
     res.json({ sucesso: true, url: session.url, sessionId: session.id });
   } catch (err) {
@@ -2798,6 +2823,9 @@ app.post("/api/ai/plan/:userId/import-day", (req, res) => {
 app.get("/api/daily-phrase", async (req, res) => {
   // Check cache
   db.query("SELECT frase FROM daily_phrases WHERE data = CURDATE()", (err, rows) => {
+    if (err) {
+      console.error("[daily-phrase] Erro DB ao verificar cache:", err.message);
+    }
     if (!err && rows.length > 0) {
       return res.json({ frase: rows[0].frase, cached: true });
     }
@@ -2807,7 +2835,10 @@ app.get("/api/daily-phrase", async (req, res) => {
 
     geminiGenerate(prompt)
       .then((text) => {
-        const frase = text.trim().replace(/^["']|["']$/g, "");
+        const frase = (text || "").trim().replace(/^["']|["']$/g, "");
+        // Se Gemini devolveu texto vazio, usar mock
+        if (!frase) throw new Error("Gemini devolveu frase vazia");
+        console.log("[daily-phrase] Frase gerada por Gemini:", frase.substring(0, 50));
         db.query(
           "INSERT INTO daily_phrases (data, frase) VALUES (CURDATE(), ?) ON DUPLICATE KEY UPDATE frase = VALUES(frase)",
           [frase],
@@ -2815,6 +2846,7 @@ app.get("/api/daily-phrase", async (req, res) => {
         );
       })
       .catch((err2) => {
+        console.warn("[daily-phrase] Gemini falhou, a usar mock:", err2.message);
         const mockFrases = [
           "O teu único limite és tu mesmo. Vai mais além.",
           "Cada treino é um passo rumo à melhor versão de ti.",
@@ -2853,6 +2885,42 @@ app.post("/api/stripe/portal", async (req, res) => {
       res.status(500).json({ erro: "Erro ao criar portal" });
     }
   });
+});
+
+// ================== PAYMENT RETURN PAGE ==================
+// Stripe redireciona para cá após sucesso/cancelamento do checkout
+app.get("/payment-return", (req, res) => {
+  const status = req.query.status === "sucesso" ? "sucesso" : "cancelado";
+  const isSucesso = status === "sucesso";
+
+  res.send(`<!DOCTYPE html>
+<html lang="pt">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GoLift — Pagamento ${isSucesso ? "Confirmado" : "Cancelado"}</title>
+  <style>
+    body { font-family: sans-serif; display: flex; align-items: center; justify-content: center;
+           min-height: 100vh; margin: 0; background: #0f0f0f; color: #fff; text-align: center; }
+    .card { background: #1a1a1a; border-radius: 16px; padding: 40px; max-width: 360px; }
+    .icon { font-size: 64px; margin-bottom: 16px; }
+    h1 { margin: 0 0 12px; font-size: 24px; }
+    p { color: #aaa; margin: 0 0 24px; }
+    .btn { background: #e63946; color: #fff; border: none; padding: 14px 28px;
+           border-radius: 10px; font-size: 16px; cursor: pointer; text-decoration: none; display: inline-block; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">${isSucesso ? "✅" : "❌"}</div>
+    <h1>${isSucesso ? "Pagamento Confirmado!" : "Pagamento Cancelado"}</h1>
+    <p>${isSucesso
+      ? "A tua subscrição GoLift Pro está ativa. Podes fechar esta página e voltar à app."
+      : "O pagamento foi cancelado. Podes fechar esta página e tentar novamente na app."}</p>
+    <p style="font-size:13px;color:#555;">Podes fechar esta janela.</p>
+  </div>
+</body>
+</html>`);
 });
 
 // ================== 404 HANDLER ==================
