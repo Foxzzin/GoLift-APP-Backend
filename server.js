@@ -29,31 +29,7 @@ if (!process.env.JWT_SECRET || process.env.JWT_SECRET === 'golift_super_secret')
 
 
 
-// --- Modular route imports ---
-const recordesRoutes = require('./routes/recordes/recordes.routes');
-const sessoesRoutes = require('./routes/sessoes/sessoes.routes');
-const utilsRoutes = require('./routes/utils/utils.routes');
-const planoRoutes = require('./routes/plano/plano.routes');
-const aiRoutes = require('./routes/ai/ai.routes');
-const stripeRoutes = require('./routes/stripe/stripe.routes');
-const comunidadeRoutes = require('./routes/comunidade/comunidade.routes');
-const treinoRoutes = require('./routes/treino/treino.routes');
-const authRoutes = require('./routes/auth/auth.routes');
-const userRoutes = require('./routes/user/user.routes');
-const adminRoutes = require('./routes/admin/admin.routes');
 
-// --- Registro das rotas ---
-app.use('/api', utilsRoutes);
-app.use('/api/recordes', recordesRoutes);
-app.use('/api/sessoes', sessoesRoutes);
-app.use('/api/plano', planoRoutes);
-app.use('/api/ai', aiRoutes);
-app.use('/api/stripe', stripeRoutes);
-app.use('/api/comunidades', comunidadeRoutes);
-app.use('/api/treinos', treinoRoutes);
-app.use('/api', authRoutes);
-app.use('/api/user', userRoutes);
-app.use('/api/admin', adminRoutes);
 // ...existing code...
 
 async function gorqGenerate({ prompt, type = "plan", diasPorSemana = 4 }) {
@@ -107,6 +83,26 @@ const SERVER_IP = (() => {
 
 
 // --- Dependências principais ---
+
+const cors = require('cors');
+const helmet = require('helmet');
+const http = require('http');
+const os = require('os');
+
+// --- Inicialização do app ---
+
+
+// --- Helmet: headers de segurança ---
+
+
+// --- CORS restrito em produção ---
+const allowedOrigins = process.env.NODE_ENV === 'production'
+  ? [process.env.CLIENT_URL, 'https://app.golift.pt']
+  : undefined;
+
+
+
+// --- Dependências principais ---
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -115,11 +111,7 @@ const os = require('os');
 
 // --- Inicialização do app ---
 const app = express();
-
-// --- Helmet: headers de segurança ---
 app.use(helmet());
-
-// --- CORS restrito em produção ---
 const allowedOrigins = process.env.NODE_ENV === 'production'
   ? [process.env.CLIENT_URL, 'https://app.golift.pt']
   : undefined;
@@ -127,9 +119,34 @@ app.use(cors({
   origin: allowedOrigins || '*',
   credentials: true
 }));
-
 app.use(express.json());
 app.set('trust proxy', 1);
+
+// --- Modular route imports ---
+const recordesRoutes = require('./routes/recordes/recordes.routes');
+const sessoesRoutes = require('./routes/sessoes/sessoes.routes');
+const utilsRoutes = require('./routes/utils/utils.routes');
+const planoRoutes = require('./routes/plano/plano.routes');
+const aiRoutes = require('./routes/ai/ai.routes');
+const stripeRoutes = require('./routes/stripe/stripe.routes');
+const comunidadeRoutes = require('./routes/comunidade/comunidade.routes');
+const treinoRoutes = require('./routes/treino/treino.routes');
+const authRoutes = require('./routes/auth/auth.routes');
+const userRoutes = require('./routes/user/user.routes');
+const adminRoutes = require('./routes/admin/admin.routes');
+
+// --- Registro das rotas ---
+app.use('/api', utilsRoutes);
+app.use('/api/recordes', recordesRoutes);
+app.use('/api/sessoes', sessoesRoutes);
+app.use('/api/plano', planoRoutes);
+app.use('/api/ai', aiRoutes);
+app.use('/api/stripe', stripeRoutes);
+app.use('/api/comunidades', comunidadeRoutes);
+app.use('/api/treinos', treinoRoutes);
+app.use('/api', authRoutes);
+app.use('/api/user', userRoutes);
+app.use('/api/admin', adminRoutes);
 
 // --- Centralizar logging seguro: nunca loggar PII, tokens, passwords ---
 // TODO: Rever todos os logs e garantir que não expõem dados sensíveis
