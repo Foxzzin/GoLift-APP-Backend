@@ -18,7 +18,7 @@ require('dotenv').config();
 
 
 
-const http = require('http');
+
 const os = require('os');
 
 // --- Segurança: JWT_SECRET obrigatório ---
