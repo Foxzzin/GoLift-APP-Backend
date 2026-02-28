@@ -1,5 +1,3 @@
-const utilsRoutes = require('./routes/utils.routes')
-app.use('/api', utilsRoutes)
 // Rotas Recordes modulares
 const recordesRoutes = require('./routes/recordes.routes')
 app.use('/api/recordes', recordesRoutes)
@@ -27,6 +25,8 @@ app.use('/api', authRoutes)
 // Rotas user modulares
 const userRoutes = require('./routes/user.routes')
 app.use('/api/user', userRoutes)
+// Modular route imports (clean, professional)
+const utilsRoutes = require('./routes/utils/utils.routes');
 // Modular route imports (clean, professional)
 const utilsRoutes = require('./routes/utils/utils.routes');
 const recordesRoutes = require('./routes/recordes/recordes.routes');
