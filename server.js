@@ -14,6 +14,17 @@ const cors    = require('cors');
 const helmet  = require('helmet');
 const http    = require('http');
 const os      = require('os');
+const jwt     = require('jsonwebtoken');
+const bcrypt  = require('bcrypt');
+const mysql   = require('mysql2');
+
+// --- Rate limiter ---
+const rateLimit = require('express-rate-limit');
+const limiterAI = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  message: { erro: 'Demasiados pedidos. Tenta novamente mais tarde.' }
+});
 
 // --- Constantes GORQ ---
 const GORQ_API_KEY  = process.env.GORQ_API_KEY;
@@ -30,6 +41,37 @@ const allowedOrigins = process.env.NODE_ENV === 'production'
 app.use(cors({ origin: allowedOrigins || '*', credentials: true }));
 app.use(express.json());
 app.set('trust proxy', 1);
+
+// --- Middleware de autenticação JWT ---
+const authenticateJWT = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1]; // Bearer <token>
+
+  if (!token) {
+    return res.status(401).json({ erro: 'Token de autenticação em falta.' });
+  }
+
+  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+    if (err) {
+      return res.status(403).json({ erro: 'Token inválido ou expirado.' });
+    }
+    req.user = user;
+    next();
+  });
+};
+
+// --- Ligação à base de dados ---
+const db = mysql.createPool({
+  host:     process.env.DB_HOST     || 'localhost',
+  user:     process.env.DB_USER     || 'root',
+  password: process.env.DB_PASSWORD || '',
+  database: process.env.DB_NAME     || 'golift',
+  waitForConnections: true,
+  connectionLimit: 10,
+});
+
+// --- Reset codes para recuperação de password ---
+const resetCodes = new Map();
 
 // --- SERVER_PORT / SERVER_IP ---
 const SERVER_PORT = process.env.PORT || 5000;
@@ -61,6 +103,11 @@ async function gorqGenerate({ prompt, type = "plan", diasPorSemana = 4 }) {
   });
   if (!res.ok) throw new Error(`[GORQ] ${res.status} ${res.statusText}`);
   return res.json();
+}
+
+// --- geminiGenerate (usado em /api/daily-phrase) ---
+async function geminiGenerate(prompt) {
+  throw new Error("geminiGenerate não configurado");
 }
 
 // --- Modular route imports ---
@@ -95,35 +142,27 @@ app.use('/api/admin',      adminRoutes);
 app.get("/api/server-info", (req, res) => {
   let clientIP = req.ip || req.connection.remoteAddress || req.socket.remoteAddress || "Desconhecido";
   
-  // Limpar IPv6 mapped addresses (ex: ::ffff:192.168.1.10 -> 192.168.1.10)
   if (clientIP.includes("::ffff:")) {
     clientIP = clientIP.split("::ffff:")[1];
   }
   
-  // Determine o IP correto para retornar
   let serverIPToReturn = SERVER_IP;
   
-  // Se o cliente está na mesma subnet, preferir usar o IP em essa subnet
   if (clientIP && clientIP !== "Desconhecido" && !clientIP.includes("127.0.0.1")) {
     const clientSubnet = clientIP.substring(0, clientIP.lastIndexOf("."));
     const serverSubnet = SERVER_IP.substring(0, SERVER_IP.lastIndexOf("."));
     
-    // Se estão na mesma subnet, usar SERVER_IP
     if (clientSubnet === serverSubnet) {
       serverIPToReturn = SERVER_IP;
-    }
-    // Se o cliente é localhost, retornar localhost
-    else if (clientIP === "127.0.0.1" || clientIP === "localhost") {
+    } else if (clientIP === "127.0.0.1" || clientIP === "localhost") {
       serverIPToReturn = "localhost";
     }
   }
   
-  // Se o servidor não está acessível, tentar usar localhost como fallback
   if (!serverIPToReturn || serverIPToReturn === "localhost") {
     serverIPToReturn = "localhost";
   }
   
-  // Se o cliente é localhost, usar localhost
   const apiURL = clientIP && (clientIP.includes("127.0.0.1") || clientIP === "localhost")
     ? `http://localhost:${SERVER_PORT}`
     : `http://${serverIPToReturn}:${SERVER_PORT}`;
@@ -138,17 +177,15 @@ app.get("/api/server-info", (req, res) => {
   });
 });
 
-// Rota de health check (para verificar se o servidor está online)
+// Rota de health check
 app.get("/api/health", (req, res) => {
   res.json({ sucesso: true, mensagem: "Servidor online" });
 });
 
-//Rota de Login
+// Rota de Login
 app.post("/api/login", (req, res) => {
   const { email, password } = req.body;
 
-
-  // Validar que email e password são strings (evita injeções com objetos como { $gt: "" })
   if (!email || !password || typeof email !== "string" || typeof password !== "string") {
     return res.status(400).json({ erro: "Email e password são obrigatórios." });
   }
@@ -167,12 +204,10 @@ app.post("/api/login", (req, res) => {
 
     const user = rows[0];
 
-    // Guard: password pode ser null para contas sem password definida
     if (!user.password || typeof user.password !== "string") {
       return res.status(401).json({ erro: "Credenciais inválidas." });
     }
 
-    // Verificar password encriptada
     try {
       const passwordCorreta = await bcrypt.compare(password, user.password);
       
@@ -180,8 +215,6 @@ app.post("/api/login", (req, res) => {
         return res.status(401).json({ erro: "Credenciais inválidas." });
       }
 
-      // Login correcto
-      // Gerar JWT
       const payload = {
         id: user.id_users,
         nome: user.userName,
@@ -209,7 +242,6 @@ app.post("/api/register", async (req, res) => {
     return res.status(400).json({ erro: "Todos os campos são obrigatórios." });
   }
 
-  // Verifica email duplicado
   const checkSql = "SELECT * FROM users WHERE email = ? LIMIT 1";
   db.query(checkSql, [email], async (err, rows) => {
     if (err) return res.status(500).json({ erro: "Erro na base de dados." });
@@ -226,14 +258,9 @@ app.post("/api/register", async (req, res) => {
   });
 });
 
-
-// server.js - ADICIONA ESTAS ROTAS AO TEU SERVIDOR
-
 // Rota para obter dados do perfil do utilizador
 app.get("/api/profile/:userId", authenticateJWT, (req, res) => {
-
   const { userId } = req.params;
-  // Só o próprio user ou admin pode aceder
   if (parseInt(userId) !== req.user.id && req.user.tipo !== 1) {
     return res.status(403).json({ erro: "Acesso negado." });
   }
@@ -267,15 +294,12 @@ app.get("/api/profile/:userId", authenticateJWT, (req, res) => {
 });
 
 // Rota para obter o streak de treinos do utilizador
-// Streak = dias CONSECUTIVOS com sessões concluídas (data_fim preenchida)
 app.get("/api/streak/:userId", authenticateJWT, (req, res) => {
-
   const { userId } = req.params;
   if (parseInt(userId) !== req.user.id && req.user.tipo !== 1) {
     return res.status(403).json({ erro: "Acesso negado." });
   }
 
-  // Obter datas únicas de sessões concluídas, ordenadas DESC
   const sql = `
     SELECT DISTINCT DATE(ts.data_fim) as data_treino
     FROM treino_sessao ts
@@ -294,7 +318,6 @@ app.get("/api/streak/:userId", authenticateJWT, (req, res) => {
       return res.json({ sucesso: true, streak: 0, maxStreak: 0 });
     }
 
-    // Calcular streak de dias consecutivos
     let currentStreak = 0;
     let maxStreak = 0;
     let today = new Date();
@@ -307,16 +330,13 @@ app.get("/api/streak/:userId", authenticateJWT, (req, res) => {
       const expectedDate = new Date(today);
       expectedDate.setDate(expectedDate.getDate() - i);
 
-      // Se a data do treino é a esperada (dias consecutivos para trás desde hoje)
       if (workoutDate.getTime() === expectedDate.getTime()) {
         currentStreak++;
       } else {
-        // Quebra de sequência
         break;
       }
     }
 
-    // maxStreak é igual a currentStreak se o treino mais recente foi hoje ou ontem
     maxStreak = currentStreak;
 
     res.json({ 
@@ -329,7 +349,6 @@ app.get("/api/streak/:userId", authenticateJWT, (req, res) => {
 
 // ---------- Admin API routes ----------
 
-// Get basic stats for admin dashboard
 app.get("/api/admin/stats", authenticateJWT, (req, res) => {
   const stats = {};
 
@@ -356,10 +375,6 @@ app.get("/api/admin/stats", authenticateJWT, (req, res) => {
   });
 });
 
-
-// ...existing code...
-
-// Get exercises (admin)
 app.get("/api/admin/exercicios", authenticateJWT, (req, res) => {
   const sql = "SELECT id_exercicio as id, nome, descricao, video, recorde_pessoal as recorde_pessoal, grupo_tipo, sub_tipo FROM exercicios ORDER BY nome ASC";
   db.query(sql, (err, rows) => {
@@ -371,18 +386,14 @@ app.get("/api/admin/exercicios", authenticateJWT, (req, res) => {
   });
 });
 
-// Add new exercise (admin)
 app.post("/api/admin/exercicios", authenticateJWT, (req, res) => {
   const { nome, descricao, video, recorde_pessoal, grupo_tipo, sub_tipo } = req.body;
   if (!nome) return res.status(400).json({ erro: "Nome do exercício é obrigatório." });
 
-  // Prevent duplicates by name
   db.query("SELECT * FROM exercicios WHERE nome = ? LIMIT 1", [nome], (err, rows) => {
     if (err) return res.status(500).json({ erro: "Erro na base de dados." });
     if (rows.length > 0) return res.status(409).json({ erro: "Exercício já existe." });
 
-    const insertSql = `INSERT INTO exercicios (nome, descricao, video, recorde_pessoal, grupo_tipo, sub_type, sub_tipo) VALUES (?, ?, ?, ?, ?, ?, ?)`;
-    // Note: some schemas may use different column names; try to insert into sub_tipo
     db.query("INSERT INTO exercicios (nome, descricao, video, recorde_pessoal, grupo_tipo, sub_tipo) VALUES (?, ?, ?, ?, ?, ?)", [nome, descricao || null, video || null, recorde_pessoal || null, grupo_tipo || null, sub_tipo || null], (err2, result) => {
       if (err2) {
         console.error(err2);
@@ -393,7 +404,6 @@ app.post("/api/admin/exercicios", authenticateJWT, (req, res) => {
   });
 });
 
-// Delete exercise (admin) by name
 app.delete("/api/admin/exercicios/:nome", authenticateJWT, (req, res) => {
   const { nome } = req.params;
   db.query("DELETE FROM exercicios WHERE nome = ?", [nome], (err, result) => {
@@ -407,14 +417,9 @@ app.delete("/api/admin/exercicios/:nome", authenticateJWT, (req, res) => {
 
 // ---------- User API routes for workouts ----------
 
-// Get all available exercises for users
 app.get("/api/exercicios", authenticateJWT, (req, res) => {
-  // Verificar se a conexão à BD está ativa
   if (!db) {
-    return res.status(500).json({ 
-      erro: "Erro de conexão à base de dados.",
-      detalhes: "Conexão não inicializada"
-    });
+    return res.status(500).json({ erro: "Erro de conexão à base de dados.", detalhes: "Conexão não inicializada" });
   }
 
   const sql = "SELECT id_exercicio as id, nome, descricao, video, grupo_tipo as category, sub_tipo as subType FROM exercicios ORDER BY nome ASC";
@@ -422,20 +427,14 @@ app.get("/api/exercicios", authenticateJWT, (req, res) => {
   db.query(sql, (err, rows) => {
     if (err) {
       console.error("[API] /api/exercicios - Erro na query:", err);
-      return res.status(500).json({ 
-        erro: "Erro ao obter exercícios.",
-        detalhes: err.sqlMessage || err.message,
-        code: err.code
-      });
+      return res.status(500).json({ erro: "Erro ao obter exercícios.", detalhes: err.sqlMessage || err.message, code: err.code });
     }
     
-    // Garantir que sempre retornamos um array, mesmo que vazio
     const result = Array.isArray(rows) ? rows : [];
     res.json(result);
   });
 });
 
-// Create a new workout (treino) for a user
 app.post("/api/treino", authenticateJWT, (req, res) => {
   const { userId, nome, exercicios, dataRealizacao } = req.body;
 
@@ -443,12 +442,10 @@ app.post("/api/treino", authenticateJWT, (req, res) => {
     return res.status(400).json({ erro: "userId, nome e lista de exercícios são obrigatórios." });
   }
 
-  // Validar nome
   if (nome.trim().length === 0) {
     return res.status(400).json({ erro: "O nome do treino não pode estar vazio." });
   }
 
-  // Verificar se o utilizador existe
   db.query("SELECT id_users FROM users WHERE id_users = ?", [userId], (err, userRows) => {
     if (err) {
       console.error(err);
@@ -458,7 +455,6 @@ app.post("/api/treino", authenticateJWT, (req, res) => {
       return res.status(404).json({ erro: "Utilizador não encontrado." });
     }
 
-    // Obter o próximo id_treino disponível
     db.query("SELECT COALESCE(MAX(id_treino), 0) + 1 as nextId FROM treino", (err, idRows) => {
       if (err) {
         console.error(err);
@@ -466,21 +462,15 @@ app.post("/api/treino", authenticateJWT, (req, res) => {
       }
 
       const newTreinoId = idRows[0].nextId;
-      // Usar data fornecida ou data atual
-      const dataTreino = dataRealizacao || new Date().toISOString().split('T')[0]; // Data no formato YYYY-MM-DD
+      const dataTreino = dataRealizacao || new Date().toISOString().split('T')[0];
 
-      // Inserir o treino na base de dados
       db.query("INSERT INTO treino (id_treino, id_users, nome, data_treino) VALUES (?, ?, ?, ?)", 
         [newTreinoId, userId, nome.trim(), dataTreino], (err, result) => {
         if (err) {
           console.error("[API] POST /api/treino - Erro ao inserir treino:", err);
-          return res.status(500).json({ 
-            erro: "Erro ao criar treino.",
-            detalhes: err.sqlMessage || err.message
-          });
+          return res.status(500).json({ erro: "Erro ao criar treino.", detalhes: err.sqlMessage || err.message });
         }
 
-        // Inserir os exercícios em treino_exercicio imediatamente
         insertExercicios();
 
         function insertExercicios() {
@@ -492,10 +482,7 @@ app.post("/api/treino", authenticateJWT, (req, res) => {
             values, (err2) => {
             if (err2) {
               console.error("[API] POST /api/treino - Erro ao inserir exercícios:", err2);
-              return res.status(500).json({ 
-                erro: "Treino criado mas erro ao guardar exercícios.",
-                detalhes: err2.sqlMessage || err2.message
-              });
+              return res.status(500).json({ erro: "Treino criado mas erro ao guardar exercícios.", detalhes: err2.sqlMessage || err2.message });
             }
 
             res.json({ 
@@ -513,12 +500,7 @@ app.post("/api/treino", authenticateJWT, (req, res) => {
   });
 });
 
-// ============================================
-// SESSÕES - Deve vir ANTES de /api/treino/:userId
-// ============================================
-// Get all workout sessions for a user (for metrics)
 app.get("/api/sessoes/:userId", authenticateJWT, (req, res) => {
-
   const { userId } = req.params;
   if (parseInt(userId) !== req.user.id && req.user.tipo !== 1) {
     return res.status(403).json({ erro: "Acesso negado." });
@@ -572,11 +554,9 @@ app.get("/api/sessoes/:userId", authenticateJWT, (req, res) => {
   });
 });
 
-// Get workout session details with exercises and records broken
 app.get("/api/sessao/detalhes/:sessaoId", authenticateJWT, (req, res) => {
   const { sessaoId } = req.params;
 
-  // Buscar tudo em uma única query otimizada com JOINs
   const sql = `
     SELECT 
       ts.id_sessao,
@@ -611,13 +591,10 @@ app.get("/api/sessao/detalhes/:sessaoId", authenticateJWT, (req, res) => {
     }
 
     const sessao = rows[0];
-
-    // Agrupar séries por exercício
     const exerciciosMap = {};
     const recordes = [];
 
     rows.forEach(row => {
-      // Processar exercícios e séries
       if (row.id_exercicio) {
         if (!exerciciosMap[row.id_exercicio]) {
           exerciciosMap[row.id_exercicio] = {
@@ -632,7 +609,6 @@ app.get("/api/sessao/detalhes/:sessaoId", authenticateJWT, (req, res) => {
           peso: row.peso
         });
 
-        // Coletar recordes
         if (row.e_recorde === 1) {
           recordes.push({
             nome_exercicio: row.nome_exercicio,
@@ -658,7 +634,6 @@ app.get("/api/sessao/detalhes/:sessaoId", authenticateJWT, (req, res) => {
   });
 });
 
-// NOVA ROTA: Retorna treinos com datas da tabela treino (não apenas sessões completadas)
 app.get("/api/treino-com-data/:userId", authenticateJWT, (req, res) => {
   const { userId } = req.params;
 
@@ -688,7 +663,7 @@ app.get("/api/treino-com-data/:userId", authenticateJWT, (req, res) => {
       id_treino: treino.id_treino,
       nome: treino.nome || `Treino ${treino.id_treino}`,
       data_treino: treino.data_treino,
-      data_inicio: treino.data_treino, // Adicionar data_inicio para compatibilidade
+      data_inicio: treino.data_treino,
       num_exercicios: treino.num_exercicios || 0,
       exercicios_nomes: treino.exercicios_nomes || "",
       grupo_tipo: treino.grupo_tipo || null
@@ -698,9 +673,7 @@ app.get("/api/treino-com-data/:userId", authenticateJWT, (req, res) => {
   });
 });
 
-// Get all workouts (treinos) for a user
 app.get("/api/treino/:userId", authenticateJWT, (req, res) => {
-
   const { userId } = req.params;
   if (parseInt(userId) !== req.user.id && req.user.tipo !== 1) {
     return res.status(403).json({ erro: "Acesso negado." });
@@ -708,7 +681,6 @@ app.get("/api/treino/:userId", authenticateJWT, (req, res) => {
 
   console.log(`👤 Carregando treinos do utilizador ID: ${userId}`);
 
-  // Tentar primeiro com nome, se falhar, tentar sem nome
   const sqlWithNome = `
     SELECT 
       t.id_treino,
@@ -730,7 +702,6 @@ app.get("/api/treino/:userId", authenticateJWT, (req, res) => {
     if (err) {
       console.error(`❌ Erro ao carregar treinos do user ${userId}:`, err.message);
       
-      // Se o erro for porque o campo nome não existe, tentar query alternativa
       if (err.code === 'ER_BAD_FIELD_ERROR' && err.sqlMessage && err.sqlMessage.includes('nome')) {
         const sqlWithoutNome = `
           SELECT 
@@ -755,7 +726,7 @@ app.get("/api/treino/:userId", authenticateJWT, (req, res) => {
           
           const treinosComExercicios = rows2.map(treino => ({
             id_treino: treino.id_treino,
-            nome: `Treino ${treino.id_treino}`, // Nome padrão se não existir
+            nome: `Treino ${treino.id_treino}`,
             data_treino: treino.data_treino,
             num_exercicios: treino.num_exercicios || 0,
             exercicios_nomes: treino.exercicios_nomes || "",
@@ -770,10 +741,9 @@ app.get("/api/treino/:userId", authenticateJWT, (req, res) => {
       return res.status(500).json({ erro: "Erro ao obter treinos.", detalhes: err.sqlMessage });
     }
     
-    // Obter detalhes dos exercícios para cada treino
     const treinosComExercicios = rows.map(treino => ({
       id_treino: treino.id_treino,
-      nome: treino.nome || `Treino ${treino.id_treino}`, // Nome padrão se não existir
+      nome: treino.nome || `Treino ${treino.id_treino}`,
       data_treino: treino.data_treino,
       is_ia: treino.is_ia || 0,
       num_exercicios: treino.num_exercicios || 0,
@@ -785,15 +755,10 @@ app.get("/api/treino/:userId", authenticateJWT, (req, res) => {
   });
 });
 
-// ============================================
 // IMPORTANTE: Esta rota DEVE estar ANTES de /api/treino/:userId/:treinoId
-// para evitar que "sessao" seja interpretado como userId
-// ============================================
-// Get workout session with exercises and sets
 app.get("/api/treino/sessao/:sessaoId", (req, res) => {
   const { sessaoId } = req.params;
 
-  // 1. Obter dados da sessão
   const query1 = "SELECT * FROM treino_sessao WHERE id_sessao = ?";
   
   db.query(query1, [sessaoId], (err, sessaoRows) => {
@@ -808,7 +773,6 @@ app.get("/api/treino/sessao/:sessaoId", (req, res) => {
 
     const sessao = sessaoRows[0];
 
-    // 2. Obter exercícios do treino
     const query2 = `
       SELECT 
         e.id_exercicio as id,
@@ -827,7 +791,6 @@ app.get("/api/treino/sessao/:sessaoId", (req, res) => {
         return res.status(500).json({ erro: "Erro ao obter exercícios." });
       }
 
-      // 3. Buscar última sessão concluída do mesmo treino para obter dados anteriores
       const query3 = `
         SELECT id_sessao
         FROM treino_sessao
@@ -845,7 +808,6 @@ app.get("/api/treino/sessao/:sessaoId", (req, res) => {
           return res.status(500).json({ erro: "Erro ao buscar sessão anterior." });
         }
 
-        // 4. Se houver sessão anterior, buscar as séries dela
         if (ultimaSessao.length > 0) {
           const idSessaoAnterior = ultimaSessao[0].id_sessao;
 
@@ -866,13 +828,9 @@ app.get("/api/treino/sessao/:sessaoId", (req, res) => {
               return res.status(500).json({ erro: "Erro ao obter séries anteriores." });
             }
 
-            // Agrupar séries anteriores por exercício
             const exerciciosComSeries = exercicios.map(ex => {
               const seriesDoExercicio = seriesAnteriores.filter(s => s.id_exercicio === ex.id);
-              return {
-                ...ex,
-                series: seriesDoExercicio
-              };
+              return { ...ex, series: seriesDoExercicio };
             });
 
             res.json({
@@ -883,11 +841,7 @@ app.get("/api/treino/sessao/:sessaoId", (req, res) => {
             });
           });
         } else {
-          // Sem sessão anterior, retornar sem séries
-          const exerciciosComSeries = exercicios.map(ex => ({
-            ...ex,
-            series: []
-          }));
+          const exerciciosComSeries = exercicios.map(ex => ({ ...ex, series: [] }));
 
           res.json({
             id_sessao: sessao.id_sessao,
@@ -901,11 +855,9 @@ app.get("/api/treino/sessao/:sessaoId", (req, res) => {
   });
 });
 
-// Get workout details with exercises
 app.get("/api/treino/:userId/:treinoId", authenticateJWT, (req, res) => {
   const { userId, treinoId } = req.params;
 
-  // Verificar se o treino pertence ao utilizador
   db.query("SELECT * FROM treino WHERE id_treino = ? AND id_users = ?", [treinoId, userId], (err, treinoRows) => {
     if (err) {
       console.error("[API] /api/treino/:userId/:treinoId - Erro:", err);
@@ -918,7 +870,6 @@ app.get("/api/treino/:userId/:treinoId", authenticateJWT, (req, res) => {
 
     const treino = treinoRows[0];
 
-    // Obter exercícios do treino
     const sql = `
       SELECT 
         e.id_exercicio as id,
@@ -948,12 +899,10 @@ app.get("/api/treino/:userId/:treinoId", authenticateJWT, (req, res) => {
   });
 });
 
-// Update workout (treino) - Editar nome e exercícios
 app.put("/api/treino/:userId/:treinoId", authenticateJWT, (req, res) => {
   const { userId, treinoId } = req.params;
   const { nome, exercicios } = req.body;
 
-  // Verificar se o treino pertence ao utilizador
   db.query("SELECT * FROM treino WHERE id_treino = ? AND id_users = ?", [treinoId, userId], (err, treinoRows) => {
     if (err) {
       console.error("[API] PUT /api/treino/:userId/:treinoId - Erro:", err);
@@ -964,7 +913,6 @@ app.put("/api/treino/:userId/:treinoId", authenticateJWT, (req, res) => {
       return res.status(404).json({ erro: "Treino não encontrado." });
     }
 
-    // Atualizar nome se fornecido
     if (nome && nome.trim().length > 0) {
       db.query("UPDATE treino SET nome = ? WHERE id_treino = ? AND id_users = ?", 
         [nome.trim(), treinoId, userId], (err2) => {
@@ -972,26 +920,20 @@ app.put("/api/treino/:userId/:treinoId", authenticateJWT, (req, res) => {
           console.error("[API] PUT /api/treino/:userId/:treinoId - Erro ao atualizar nome:", err2);
           return res.status(500).json({ erro: "Erro ao atualizar nome do treino.", detalhes: err2.sqlMessage });
         }
-
-        // Após atualizar nome, atualizar exercícios se fornecidos
         atualizarExercicios();
       });
     } else {
-      // Se não há nome para atualizar, atualizar exercícios diretamente
       atualizarExercicios();
     }
 
     function atualizarExercicios() {
-      // Atualizar exercícios se fornecidos
       if (exercicios && Array.isArray(exercicios)) {
-        // Apagar exercícios antigos
         db.query("DELETE FROM treino_exercicio WHERE id_treino = ?", [treinoId], (err3) => {
           if (err3) {
             console.error("[API] PUT /api/treino/:userId/:treinoId - Erro ao apagar exercícios:", err3);
             return res.status(500).json({ erro: "Erro ao atualizar exercícios.", detalhes: err3.sqlMessage });
           }
 
-          // Inserir novos exercícios
           if (exercicios.length > 0) {
             const exercicioValues = exercicios.map(exId => [treinoId, exId]);
             const placeholders = exercicios.map(() => "(?, ?)").join(", ");
@@ -1003,7 +945,6 @@ app.put("/api/treino/:userId/:treinoId", authenticateJWT, (req, res) => {
                 console.error("[API] PUT /api/treino/:userId/:treinoId - Erro ao inserir exercícios:", err4);
                 return res.status(500).json({ erro: "Erro ao atualizar exercícios.", detalhes: err4.sqlMessage });
               }
-
               res.json({ sucesso: true, mensagem: "Treino atualizado com sucesso!" });
             });
           } else {
@@ -1011,18 +952,15 @@ app.put("/api/treino/:userId/:treinoId", authenticateJWT, (req, res) => {
           }
         });
       } else {
-        // Se não há exercícios para atualizar, apenas retornar sucesso
         res.json({ sucesso: true, mensagem: "Treino atualizado com sucesso!" });
       }
     }
   });
 });
 
-// Delete workout (treino)
 app.delete("/api/treino/:userId/:treinoId", authenticateJWT, (req, res) => {
   const { userId, treinoId } = req.params;
 
-  // Verificar se o treino pertence ao utilizador
   db.query("SELECT * FROM treino WHERE id_treino = ? AND id_users = ?", [treinoId, userId], (err, treinoRows) => {
     if (err) {
       console.error("[API] DELETE /api/treino/:userId/:treinoId - Erro:", err);
@@ -1033,7 +971,6 @@ app.delete("/api/treino/:userId/:treinoId", authenticateJWT, (req, res) => {
       return res.status(404).json({ erro: "Treino não encontrado." });
     }
 
-    // Obter todas as sessões do treino para poder apagar as séries
     db.query("SELECT id_sessao FROM treino_sessao WHERE id_treino = ?", [treinoId], (err2, sessoes) => {
       if (err2) {
         console.error("[API] DELETE /api/treino - Erro ao obter sessões:", err2);
@@ -1042,7 +979,6 @@ app.delete("/api/treino/:userId/:treinoId", authenticateJWT, (req, res) => {
 
       const sessaoIds = sessoes.map(s => s.id_sessao);
 
-      // Apagar séries de todas as sessões (se existirem)
       const deleteSeries = (cb) => {
         if (sessaoIds.length === 0) return cb();
         const placeholders = sessaoIds.map(() => "?").join(", ");
@@ -1056,21 +992,18 @@ app.delete("/api/treino/:userId/:treinoId", authenticateJWT, (req, res) => {
       };
 
       deleteSeries(() => {
-        // Apagar todas as sessões do treino
         db.query("DELETE FROM treino_sessao WHERE id_treino = ?", [treinoId], (err4) => {
           if (err4) {
             console.error("[API] DELETE /api/treino - Erro ao apagar sessões:", err4);
             return res.status(500).json({ erro: "Erro ao apagar sessões do treino." });
           }
 
-          // Apagar exercícios do treino
           db.query("DELETE FROM treino_exercicio WHERE id_treino = ?", [treinoId], (err5) => {
             if (err5) {
               console.error("[API] DELETE /api/treino - Erro ao apagar exercícios:", err5);
               return res.status(500).json({ erro: "Erro ao apagar exercícios do treino." });
             }
 
-            // Apagar o treino
             db.query("DELETE FROM treino WHERE id_treino = ? AND id_users = ?", [treinoId, userId], (err6) => {
               if (err6) {
                 console.error("[API] DELETE /api/treino - Erro ao apagar treino:", err6);
@@ -1086,7 +1019,6 @@ app.delete("/api/treino/:userId/:treinoId", authenticateJWT, (req, res) => {
   });
 });
 
-// Save complete workout session in a single request
 app.post("/api/treino/sessao/guardar", authenticateJWT, (req, res) => {
   const { userId, treinoId, duracao_segundos, series } = req.body;
 
@@ -1094,7 +1026,6 @@ app.post("/api/treino/sessao/guardar", authenticateJWT, (req, res) => {
     return res.status(400).json({ erro: "userId, treinoId e series são obrigatórios." });
   }
 
-  // Create session with duration and finish time set immediately
   db.query(
     "INSERT INTO treino_sessao (id_treino, id_users, data_fim, duracao_segundos) VALUES (?, ?, NOW(), ?)",
     [treinoId, userId, duracao_segundos || 0],
@@ -1106,7 +1037,6 @@ app.post("/api/treino/sessao/guardar", authenticateJWT, (req, res) => {
 
       const sessaoId = result.insertId;
 
-      // Insert all series at once
       const values = series.map((s) => [sessaoId, s.id_exercicio, s.numero_serie, s.repeticoes || 0, s.peso || 0]);
       const placeholders = values.map(() => "(?, ?, ?, ?, ?)").join(", ");
       const flatValues = values.flat();
@@ -1120,7 +1050,6 @@ app.post("/api/treino/sessao/guardar", authenticateJWT, (req, res) => {
             return res.status(500).json({ erro: "Erro ao guardar séries." });
           }
 
-          // Mark workout as completed (required for streak calculation)
           db.query("UPDATE treino SET status = 'completed' WHERE id_treino = ?", [treinoId], (err3) => {
             if (err3) {
               console.warn("[API] POST /api/treino/sessao/guardar - Erro ao atualizar status:", err3);
@@ -1133,9 +1062,6 @@ app.post("/api/treino/sessao/guardar", authenticateJWT, (req, res) => {
   );
 });
 
-// (endpoints legacy /iniciar /serie /finalizar /cancelar removidos — substituídos por /api/treino/sessao/guardar)
-
-// Get full workout details with exercises, series, weight and reps
 app.get("/api/treino-sessao-detalhes/:sessaoId", authenticateJWT, (req, res) => {
   const { sessaoId } = req.params;
 
@@ -1176,7 +1102,6 @@ app.get("/api/treino-sessao-detalhes/:sessaoId", authenticateJWT, (req, res) => 
     const sessao = rows[0];
     const exercicios = {};
 
-    // Agrupar séries por exercício
     rows.forEach((row) => {
       if (row.id_exercicio) {
         if (!exercicios[row.id_exercicio]) {
@@ -1211,9 +1136,7 @@ app.get("/api/treino-sessao-detalhes/:sessaoId", authenticateJWT, (req, res) => 
   });
 });
 
-// Get personal records (recordes pessoais) for a user
 app.get("/api/recordes/:userId", authenticateJWT, (req, res) => {
-
   const { userId } = req.params;
   if (parseInt(userId) !== req.user.id && req.user.tipo !== 1) {
     return res.status(403).json({ erro: "Acesso negado." });
@@ -1242,11 +1165,9 @@ app.get("/api/recordes/:userId", authenticateJWT, (req, res) => {
   });
 });
 
-// Get workout details with series
 app.get("/api/treino/detalhes/:treinoId/:dataIso", authenticateJWT, (req, res) => {
   const { treinoId, dataIso } = req.params;
 
-  // Buscar informações do treino
   db.query("SELECT * FROM treino WHERE id_treino = ?", [treinoId], (err, treinoRows) => {
     if (err) {
       console.error("[API] /api/treino/detalhes - Erro:", err);
@@ -1259,7 +1180,6 @@ app.get("/api/treino/detalhes/:treinoId/:dataIso", authenticateJWT, (req, res) =
 
     const treino = treinoRows[0];
 
-    // Primeiro buscar exercícios do treino
     const sqlExercicios = `
       SELECT 
         e.id_exercicio,
@@ -1277,43 +1197,22 @@ app.get("/api/treino/detalhes/:treinoId/:dataIso", authenticateJWT, (req, res) =
       }
 
       if (exerciciosRows.length === 0) {
-        return res.json({
-          nome: treino.nome || "Treino",
-          data: treino.data_treino,
-          exercicios: []
-        });
+        return res.json({ nome: treino.nome || "Treino", data: treino.data_treino, exercicios: [] });
       }
 
-      // Buscar sessão pela data específica
-      const dataInicio = `${dataIso}%`;
-      
       db.query(
         "SELECT id_sessao, data_inicio FROM treino_sessao WHERE id_treino = ? AND DATE(data_inicio) = ? ORDER BY data_inicio DESC LIMIT 1",
         [treinoId, dataIso],
         (err3, sessaoRows) => {
-          // Se não houver sessão, retornar exercícios sem séries
           if (err3 || sessaoRows.length === 0) {
-            const exercicios = exerciciosRows.map(ex => ({
-              nome: ex.exercicio,
-              series: []
-            }));
-
-            return res.json({
-              nome: treino.nome || "Treino",
-              data: treino.data_treino,
-              exercicios: exercicios
-            });
+            const exercicios = exerciciosRows.map(ex => ({ nome: ex.exercicio, series: [] }));
+            return res.json({ nome: treino.nome || "Treino", data: treino.data_treino, exercicios: exercicios });
           }
 
           const sessaoId = sessaoRows[0].id_sessao;
 
-          // Buscar séries da sessão
           const sqlSeries = `
-            SELECT 
-              ts.id_exercicio,
-              ts.numero_serie,
-              ts.repeticoes,
-              ts.peso
+            SELECT ts.id_exercicio, ts.numero_serie, ts.repeticoes, ts.peso
             FROM treino_serie ts
             WHERE ts.id_sessao = ?
             ORDER BY ts.numero_serie ASC
@@ -1324,30 +1223,20 @@ app.get("/api/treino/detalhes/:treinoId/:dataIso", authenticateJWT, (req, res) =
               console.error("[API] /api/treino/detalhes - Erro ao buscar séries:", err4);
             }
 
-            // Criar mapa de séries por exercício
             const seriesMap = {};
             (seriesRows || []).forEach(row => {
               if (!seriesMap[row.id_exercicio]) {
                 seriesMap[row.id_exercicio] = [];
               }
-              seriesMap[row.id_exercicio].push({
-                numero: row.numero_serie,
-                repeticoes: row.repeticoes,
-                peso: row.peso
-              });
+              seriesMap[row.id_exercicio].push({ numero: row.numero_serie, repeticoes: row.repeticoes, peso: row.peso });
             });
 
-            // Montar resposta final
             const exercicios = exerciciosRows.map(ex => ({
               nome: ex.exercicio,
               series: seriesMap[ex.id_exercicio] || []
             }));
 
-            res.json({
-              nome: treino.nome || "Treino",
-              data: treino.data_treino,
-              exercicios: exercicios
-            });
+            res.json({ nome: treino.nome || "Treino", data: treino.data_treino, exercicios: exercicios });
           });
         }
       );
@@ -1357,13 +1246,8 @@ app.get("/api/treino/detalhes/:treinoId/:dataIso", authenticateJWT, (req, res) =
 
 // ============ ROTAS DE TREINOS PARA ADMINS ============
 
-// GET - Obter todos os treinos de admin
 app.get("/api/treino-admin", authenticateJWT, (req, res) => {
-  const sql = `
-    SELECT ta.id_treino_admin, ta.nome, ta.criado_em
-    FROM treino_admin ta
-    ORDER BY ta.criado_em DESC
-  `;
+  const sql = `SELECT ta.id_treino_admin, ta.nome, ta.criado_em FROM treino_admin ta ORDER BY ta.criado_em DESC`;
   
   db.query(sql, (err, treinosRows) => {
     if (err) {
@@ -1371,11 +1255,8 @@ app.get("/api/treino-admin", authenticateJWT, (req, res) => {
       return res.status(500).json({ erro: "Erro ao obter treinos." });
     }
 
-    if (treinosRows.length === 0) {
-      return res.json([]);
-    }
+    if (treinosRows.length === 0) return res.json([]);
 
-    // Obter exercícios para cada treino
     const resultado = [];
     let processados = 0;
 
@@ -1389,50 +1270,29 @@ app.get("/api/treino-admin", authenticateJWT, (req, res) => {
       `;
 
       db.query(sqlExercicos, [treino.id_treino_admin], (err, exerciciosRows) => {
-        if (err) {
-          console.error("Erro ao obter exercícios do treino admin:", err);
-          exerciciosRows = [];
-        }
+        if (err) { console.error("Erro ao obter exercícios do treino admin:", err); exerciciosRows = []; }
 
         resultado.push({
           id_treino_admin: treino.id_treino_admin,
           nome: treino.nome,
-          exercicios: exerciciosRows.map((ex) => ({
-            id: ex.id_exercicio,
-            name: ex.nome,
-            category: ex.grupo_tipo,
-          })),
+          exercicios: exerciciosRows.map((ex) => ({ id: ex.id_exercicio, name: ex.nome, category: ex.grupo_tipo })),
           criado_em: treino.criado_em,
         });
 
         processados++;
-        if (processados === treinosRows.length) {
-          res.json(resultado);
-        }
+        if (processados === treinosRows.length) res.json(resultado);
       });
     });
   });
 });
 
-// Alias para /api/treinos-admin (com 's')
 app.get("/api/treinos-admin", authenticateJWT, (req, res) => {
-  const sql = `
-    SELECT ta.id_treino_admin, ta.nome, ta.criado_em
-    FROM treino_admin ta
-    ORDER BY ta.criado_em DESC
-  `;
+  const sql = `SELECT ta.id_treino_admin, ta.nome, ta.criado_em FROM treino_admin ta ORDER BY ta.criado_em DESC`;
   
   db.query(sql, (err, treinosRows) => {
-    if (err) {
-      console.error("Erro ao obter treinos de admin:", err);
-      return res.status(500).json({ erro: "Erro ao obter treinos." });
-    }
+    if (err) { console.error("Erro ao obter treinos de admin:", err); return res.status(500).json({ erro: "Erro ao obter treinos." }); }
+    if (!treinosRows || treinosRows.length === 0) return res.json([]);
 
-    if (!treinosRows || treinosRows.length === 0) {
-      return res.json([]);
-    }
-
-    // Para cada treino, obter os exercícios
     const resultado = [];
     let processados = 0;
 
@@ -1446,41 +1306,20 @@ app.get("/api/treinos-admin", authenticateJWT, (req, res) => {
       `;
 
       db.query(sqlExercicios, [treino.id_treino_admin], (err, exercicios) => {
-        if (!err) {
-          resultado.push({
-            ...treino,
-            exercicios: exercicios || []
-          });
-        }
-
+        if (!err) resultado.push({ ...treino, exercicios: exercicios || [] });
         processados++;
-        if (processados === treinosRows.length) {
-          res.json(resultado);
-        }
+        if (processados === treinosRows.length) res.json(resultado);
       });
     });
   });
 });
 
-// GET - Obter detalhes de um treino de admin específico
 app.get("/api/treino-admin/:id", authenticateJWT, (req, res) => {
   const { id } = req.params;
 
-  const sql = `
-    SELECT ta.id_treino_admin, ta.nome
-    FROM treino_admin ta
-    WHERE ta.id_treino_admin = ?
-  `;
-
-  db.query(sql, [id], (err, treinosRows) => {
-    if (err) {
-      console.error("Erro ao obter treino admin:", err);
-      return res.status(500).json({ erro: "Erro ao obter treino." });
-    }
-
-    if (treinosRows.length === 0) {
-      return res.status(404).json({ erro: "Treino não encontrado." });
-    }
+  db.query("SELECT ta.id_treino_admin, ta.nome FROM treino_admin ta WHERE ta.id_treino_admin = ?", [id], (err, treinosRows) => {
+    if (err) { console.error("Erro ao obter treino admin:", err); return res.status(500).json({ erro: "Erro ao obter treino." }); }
+    if (treinosRows.length === 0) return res.status(404).json({ erro: "Treino não encontrado." });
 
     const treino = treinosRows[0];
 
@@ -1493,149 +1332,71 @@ app.get("/api/treino-admin/:id", authenticateJWT, (req, res) => {
     `;
 
     db.query(sqlExercicos, [id], (err, exerciciosRows) => {
-      if (err) {
-        console.error("Erro ao obter exercícios:", err);
-        exerciciosRows = [];
-      }
+      if (err) { console.error("Erro ao obter exercícios:", err); exerciciosRows = []; }
 
       res.json({
         id_treino_admin: treino.id_treino_admin,
         nome: treino.nome,
-        exercicios: exerciciosRows.map((ex) => ({
-          id: ex.id_exercicio,
-          name: ex.nome,
-          category: ex.grupo_tipo,
-        })),
+        exercicios: exerciciosRows.map((ex) => ({ id: ex.id_exercicio, name: ex.nome, category: ex.grupo_tipo })),
       });
     });
   });
 });
 
-// POST - Criar novo treino de admin
 app.post("/api/treino-admin", authenticateJWT, (req, res) => {
   const { nome, exercicios } = req.body;
 
   if (!nome || !Array.isArray(exercicios) || exercicios.length === 0) {
-    return res.status(400).json({
-      sucesso: false,
-      erro: "Nome e exercícios são obrigatórios.",
-    });
+    return res.status(400).json({ sucesso: false, erro: "Nome e exercícios são obrigatórios." });
   }
 
-  const sqlInsertTreino = `
-    INSERT INTO treino_admin (nome, criado_em)
-    VALUES (?, NOW())
-  `;
-
-  db.query(sqlInsertTreino, [nome], (err, result) => {
-    if (err) {
-      console.error("Erro ao criar treino admin:", err);
-      return res.status(500).json({ sucesso: false, erro: "Erro ao criar treino." });
-    }
+  db.query("INSERT INTO treino_admin (nome, criado_em) VALUES (?, NOW())", [nome], (err, result) => {
+    if (err) { console.error("Erro ao criar treino admin:", err); return res.status(500).json({ sucesso: false, erro: "Erro ao criar treino." }); }
 
     const treinoAdminId = result.insertId;
-
-    // Inserir exercícios
-    const sqlInsertExercicos = `
-      INSERT INTO treino_admin_exercicio (id_treino_admin, id_exercicio)
-      VALUES (?, ?)
-    `;
-
     let inseridos = 0;
     let erroOcorreu = false;
 
     exercicios.forEach((exercicioId) => {
-      db.query(sqlInsertExercicos, [treinoAdminId, exercicioId], (err) => {
-        if (err) {
-          console.error("Erro ao inserir exercício no treino admin:", err);
-          erroOcorreu = true;
-        }
+      db.query("INSERT INTO treino_admin_exercicio (id_treino_admin, id_exercicio) VALUES (?, ?)", [treinoAdminId, exercicioId], (err) => {
+        if (err) { console.error("Erro ao inserir exercício no treino admin:", err); erroOcorreu = true; }
         inseridos++;
-
         if (inseridos === exercicios.length) {
-          if (erroOcorreu) {
-            return res.status(500).json({ 
-              sucesso: false, 
-              erro: "Erro ao adicionar alguns exercícios ao treino." 
-            });
-          }
-          res.json({
-            sucesso: true,
-            mensagem: "Treino criado com sucesso!",
-            id_treino_admin: treinoAdminId,
-          });
+          if (erroOcorreu) return res.status(500).json({ sucesso: false, erro: "Erro ao adicionar alguns exercícios ao treino." });
+          res.json({ sucesso: true, mensagem: "Treino criado com sucesso!", id_treino_admin: treinoAdminId });
         }
       });
     });
   });
 });
 
-// PUT - Atualizar treino de admin
 app.put("/api/treino-admin/:id", authenticateJWT, (req, res) => {
   const { id } = req.params;
   const { nome, exercicios } = req.body;
 
   if (!nome || !Array.isArray(exercicios) || exercicios.length === 0) {
-    return res.status(400).json({
-      sucesso: false,
-      erro: "Nome e exercícios são obrigatórios.",
-    });
+    return res.status(400).json({ sucesso: false, erro: "Nome e exercícios são obrigatórios." });
   }
 
-  const sqlUpdate = "UPDATE treino_admin SET nome = ?, atualizado_em = NOW() WHERE id_treino_admin = ?";
+  db.query("UPDATE treino_admin SET nome = ?, atualizado_em = NOW() WHERE id_treino_admin = ?", [nome, id], (err) => {
+    if (err) { console.error("Erro ao atualizar treino admin:", err); return res.status(500).json({ sucesso: false, erro: "Erro ao atualizar treino." }); }
 
-  db.query(sqlUpdate, [nome, id], (err) => {
-    if (err) {
-      console.error("Erro ao atualizar treino admin:", err);
-      return res.status(500).json({ sucesso: false, erro: "Erro ao atualizar treino." });
-    }
+    db.query("DELETE FROM treino_admin_exercicio WHERE id_treino_admin = ?", [id], (err) => {
+      if (err) { console.error("Erro ao deletar exercícios antigos:", err); return res.status(500).json({ sucesso: false, erro: "Erro ao atualizar exercícios." }); }
 
-    // Deletar exercícios antigos
-    const sqlDeleteExercicos = "DELETE FROM treino_admin_exercicio WHERE id_treino_admin = ?";
-    db.query(sqlDeleteExercicos, [id], (err) => {
-      if (err) {
-        console.error("Erro ao deletar exercícios antigos:", err);
-        return res.status(500).json({ sucesso: false, erro: "Erro ao atualizar exercícios." });
-      }
-
-      if (exercicios.length === 0) {
-        return res.json({
-          sucesso: true,
-          mensagem: "Treino atualizado com sucesso!",
-          id_treino_admin: id,
-        });
-      }
-
-      // Inserir novos exercícios
-      const sqlInsertExercicos = `
-        INSERT INTO treino_admin_exercicio (id_treino_admin, id_exercicio)
-        VALUES (?, ?)
-      `;
+      if (exercicios.length === 0) return res.json({ sucesso: true, mensagem: "Treino atualizado com sucesso!", id_treino_admin: id });
 
       let inseridos = 0;
       let erroOcorreu = false;
       const erros = [];
 
       exercicios.forEach((exercicioId) => {
-        db.query(sqlInsertExercicos, [id, exercicioId], (err) => {
-          if (err) {
-            console.error(`Erro ao inserir exercício ${exercicioId}:`, err);
-            erroOcorreu = true;
-            erros.push(exercicioId);
-          }
+        db.query("INSERT INTO treino_admin_exercicio (id_treino_admin, id_exercicio) VALUES (?, ?)", [id, exercicioId], (err) => {
+          if (err) { console.error(`Erro ao inserir exercício ${exercicioId}:`, err); erroOcorreu = true; erros.push(exercicioId); }
           inseridos++;
-
           if (inseridos === exercicios.length) {
-            if (erroOcorreu) {
-              return res.status(500).json({ 
-                sucesso: false, 
-                erro: `Erro ao adicionar exercícios: ${erros.join(', ')}` 
-              });
-            }
-            res.json({
-              sucesso: true,
-              mensagem: "Treino atualizado com sucesso!",
-            });
+            if (erroOcorreu) return res.status(500).json({ sucesso: false, erro: `Erro ao adicionar exercícios: ${erros.join(', ')}` });
+            res.json({ sucesso: true, mensagem: "Treino atualizado com sucesso!" });
           }
         });
       });
@@ -1643,137 +1404,62 @@ app.put("/api/treino-admin/:id", authenticateJWT, (req, res) => {
   });
 });
 
-// DELETE - Apagar treino de admin
 app.delete("/api/treino-admin/:id", authenticateJWT, (req, res) => {
   const { id } = req.params;
 
-  const sqlDelete = "DELETE FROM treino_admin WHERE id_treino_admin = ?";
-  db.query(sqlDelete, [id], (err) => {
-    if (err) {
-      console.error("Erro ao deletar treino admin:", err);
-      return res.status(500).json({ sucesso: false, erro: "Erro ao deletar treino." });
-    }
-
-    res.json({
-      sucesso: true,
-      mensagem: "Treino deletado com sucesso!",
-    });
+  db.query("DELETE FROM treino_admin WHERE id_treino_admin = ?", [id], (err) => {
+    if (err) { console.error("Erro ao deletar treino admin:", err); return res.status(500).json({ sucesso: false, erro: "Erro ao deletar treino." }); }
+    res.json({ sucesso: true, mensagem: "Treino deletado com sucesso!" });
   });
 });
-
 
 // ============ RECUPERAÇÃO DE SENHA ============
 
-// Armazenar códigos de recuperação temporariamente (em produção usar Redis ou BD)
 const recoveryCodes = new Map();
 
-// Solicitar recuperação de senha - gera código de 6 dígitos
 app.post("/api/recuperar-senha", (req, res) => {
   const { email } = req.body;
 
-  if (!email) {
-    return res.status(400).json({ erro: "Email é obrigatório." });
-  }
+  if (!email) return res.status(400).json({ erro: "Email é obrigatório." });
 
-  // Verificar se o email existe
   db.query("SELECT id_users, userName FROM users WHERE email = ?", [email], (err, rows) => {
-    if (err) {
-      console.error("Erro ao verificar email:", err);
-      return res.status(500).json({ erro: "Erro na base de dados." });
-    }
+    if (err) { console.error("Erro ao verificar email:", err); return res.status(500).json({ erro: "Erro na base de dados." }); }
+    if (rows.length === 0) return res.status(404).json({ erro: "Email não encontrado." });
 
-    if (rows.length === 0) {
-      return res.status(404).json({ erro: "Email não encontrado." });
-    }
-
-    // Gerar código de 6 dígitos
     const code = Math.floor(100000 + Math.random() * 900000).toString();
-    
-    // Guardar código com expiração de 15 minutos
-    recoveryCodes.set(email, {
-      code,
-      expiresAt: Date.now() + 15 * 60 * 1000,
-      userId: rows[0].id_users
-    });
+    recoveryCodes.set(email, { code, expiresAt: Date.now() + 15 * 60 * 1000, userId: rows[0].id_users });
 
-    // Em produção, enviar email com o código
-    // Por agora, retornar sucesso (código aparece no console do servidor)
-    res.json({ 
-      sucesso: true, 
-      mensagem: "Código de recuperação enviado para o email.",
-      // REMOVER EM PRODUÇÃO - apenas para testes
-      codigo_teste: code
-    });
+    res.json({ sucesso: true, mensagem: "Código de recuperação enviado para o email.", codigo_teste: code });
   });
 });
 
-// Verificar código de recuperação
 app.post("/api/verificar-codigo", (req, res) => {
   const { email, codigo } = req.body;
-
-  if (!email || !codigo) {
-    return res.status(400).json({ erro: "Email e código são obrigatórios." });
-  }
+  if (!email || !codigo) return res.status(400).json({ erro: "Email e código são obrigatórios." });
 
   const recovery = recoveryCodes.get(email);
-
-  if (!recovery) {
-    return res.status(400).json({ erro: "Nenhum código de recuperação encontrado. Solicite um novo." });
-  }
-
-  if (Date.now() > recovery.expiresAt) {
-    recoveryCodes.delete(email);
-    return res.status(400).json({ erro: "Código expirado. Solicite um novo." });
-  }
-
-  if (recovery.code !== codigo) {
-    return res.status(400).json({ erro: "Código inválido." });
-  }
+  if (!recovery) return res.status(400).json({ erro: "Nenhum código de recuperação encontrado. Solicite um novo." });
+  if (Date.now() > recovery.expiresAt) { recoveryCodes.delete(email); return res.status(400).json({ erro: "Código expirado. Solicite um novo." }); }
+  if (recovery.code !== codigo) return res.status(400).json({ erro: "Código inválido." });
 
   res.json({ sucesso: true, mensagem: "Código válido." });
 });
 
-// Redefinir senha
 app.post("/api/redefinir-senha", async (req, res) => {
   const { email, codigo, novaSenha } = req.body;
-
-  if (!email || !codigo || !novaSenha) {
-    return res.status(400).json({ erro: "Todos os campos são obrigatórios." });
-  }
-
-  if (novaSenha.length < 6) {
-    return res.status(400).json({ erro: "A senha deve ter pelo menos 6 caracteres." });
-  }
+  if (!email || !codigo || !novaSenha) return res.status(400).json({ erro: "Todos os campos são obrigatórios." });
+  if (novaSenha.length < 6) return res.status(400).json({ erro: "A senha deve ter pelo menos 6 caracteres." });
 
   const recovery = recoveryCodes.get(email);
-
-  if (!recovery) {
-    return res.status(400).json({ erro: "Nenhum código de recuperação encontrado." });
-  }
-
-  if (Date.now() > recovery.expiresAt) {
-    recoveryCodes.delete(email);
-    return res.status(400).json({ erro: "Código expirado. Solicite um novo." });
-  }
-
-  if (recovery.code !== codigo) {
-    return res.status(400).json({ erro: "Código inválido." });
-  }
+  if (!recovery) return res.status(400).json({ erro: "Nenhum código de recuperação encontrado." });
+  if (Date.now() > recovery.expiresAt) { recoveryCodes.delete(email); return res.status(400).json({ erro: "Código expirado. Solicite um novo." }); }
+  if (recovery.code !== codigo) return res.status(400).json({ erro: "Código inválido." });
 
   try {
-    // Hash da nova senha
     const hashedPassword = await bcrypt.hash(novaSenha, 10);
-
-    // Atualizar senha na BD
     db.query("UPDATE users SET password = ? WHERE email = ?", [hashedPassword, email], (err) => {
-      if (err) {
-        console.error("Erro ao atualizar senha:", err);
-        return res.status(500).json({ erro: "Erro ao atualizar senha." });
-      }
-
-      // Remover código usado
+      if (err) { console.error("Erro ao atualizar senha:", err); return res.status(500).json({ erro: "Erro ao atualizar senha." }); }
       recoveryCodes.delete(email);
-
       res.json({ sucesso: true, mensagem: "Senha alterada com sucesso!" });
     });
   } catch (error) {
@@ -1782,20 +1468,13 @@ app.post("/api/redefinir-senha", async (req, res) => {
   }
 });
 
-
-// 3. OBTER EXERCÍCIOS DE UM TREINO DO USER
 app.get('/api/treino-user/:treino_id/exercicios', (req, res) => {
   const { treino_id } = req.params;
 
   console.log(`📋 Carregando exercícios do treino ID: ${treino_id}`);
 
   const sql = `
-    SELECT 
-      e.id_exercicio, 
-      e.nome, 
-      e.descricao, 
-      e.grupo_tipo, 
-      e.sub_tipo
+    SELECT e.id_exercicio, e.nome, e.descricao, e.grupo_tipo, e.sub_tipo
     FROM treino_exercicio te 
     LEFT JOIN exercicios e ON te.id_exercicio = e.id_exercicio 
     WHERE te.id_treino = ?`;
@@ -1803,49 +1482,25 @@ app.get('/api/treino-user/:treino_id/exercicios', (req, res) => {
   db.query(sql, [treino_id], (err, rows) => {
     if (err) {
       console.error(`❌ Erro ao obter exercícios do treino ${treino_id}:`, err.message);
-      return res.status(500).json({
-        sucesso: false,
-        erro: 'Erro ao obter exercícios',
-        detalhes: err.message,
-        treino_id
-      });
+      return res.status(500).json({ sucesso: false, erro: 'Erro ao obter exercícios', detalhes: err.message, treino_id });
     }
 
     console.log(`✅ Treino ${treino_id}: ${rows?.length || 0} exercícios encontrados`);
-    
-    res.json({
-      sucesso: true,
-      exercicios: rows || [],
-      treino_id,
-      total: rows?.length || 0
-    });
+    res.json({ sucesso: true, exercicios: rows || [], treino_id, total: rows?.length || 0 });
   });
 });
 
-// 4. REMOVER EXERCÍCIO DO TREINO DO USER
 app.delete('/api/treino-user/:treino_id/exercicios/:exercicio_id', (req, res) => {
   const { treino_id, exercicio_id } = req.params;
 
-  const sql = 'DELETE FROM treino_exercicio WHERE id_treino = ? AND id_exercicio = ?';
-  db.query(sql, [treino_id, exercicio_id], (err) => {
-    if (err) {
-      console.error('Erro ao remover exercício:', err);
-      return res.status(500).json({
-        sucesso: false,
-        erro: 'Erro ao remover exercício'
-      });
-    }
-
-    res.json({
-      sucesso: true,
-      mensagem: 'Exercício removido com sucesso'
-    });
+  db.query('DELETE FROM treino_exercicio WHERE id_treino = ? AND id_exercicio = ?', [treino_id, exercicio_id], (err) => {
+    if (err) { console.error('Erro ao remover exercício:', err); return res.status(500).json({ sucesso: false, erro: 'Erro ao remover exercício' }); }
+    res.json({ sucesso: true, mensagem: 'Exercício removido com sucesso' });
   });
 });
 
 // ================== ENDPOINTS DE COMUNIDADES ==================
 
-// GET /api/comunidades - obter todas as comunidades verificadas
 app.get("/api/comunidades", authenticateJWT, (req, res) => {
   const sql = `
     SELECT c.*, u.userName as criador_nome,
@@ -1855,20 +1510,14 @@ app.get("/api/comunidades", authenticateJWT, (req, res) => {
     WHERE c.verificada = 1
     ORDER BY c.criada_em DESC
   `;
-  
   db.query(sql, (err, results) => {
-    if (err) {
-      console.error("Erro ao obter comunidades:", err);
-      return res.status(500).json({ erro: "Erro ao obter comunidades" });
-    }
+    if (err) { console.error("Erro ao obter comunidades:", err); return res.status(500).json({ erro: "Erro ao obter comunidades" }); }
     res.json(results || []);
   });
 });
 
-// GET /api/comunidades/user/:userId - obter comunidades do utilizador
 app.get("/api/comunidades/user/:userId", authenticateJWT, (req, res) => {
   const { userId } = req.params;
-  
   const sql = `
     SELECT c.*, u.userName as criador_nome,
            (SELECT COUNT(*) FROM comunidade_membros WHERE comunidade_id = c.id) as membros
@@ -1878,65 +1527,34 @@ app.get("/api/comunidades/user/:userId", authenticateJWT, (req, res) => {
     WHERE cm.user_id = ?
     ORDER BY c.criada_em DESC
   `;
-  
   db.query(sql, [userId], (err, results) => {
-    if (err) {
-      console.error("Erro ao obter comunidades do utilizador:", err);
-      return res.status(500).json({ erro: "Erro ao obter comunidades" });
-    }
+    if (err) { console.error("Erro ao obter comunidades do utilizador:", err); return res.status(500).json({ erro: "Erro ao obter comunidades" }); }
     res.json(results || []);
   });
 });
 
-// POST /api/comunidades - criar comunidade
 app.post("/api/comunidades", authenticateJWT, (req, res) => {
   const { nome, descricao, criador_id, pais, linguas, privada } = req.body;
-  
-  if (!nome || !descricao || !criador_id) {
-    return res.status(400).json({ erro: "Nome, descrição e criador_id são obrigatórios" });
-  }
-  
-  const sql = `
-    INSERT INTO comunidades (nome, descricao, criador_id, pais, linguas, privada, verificada)
-    VALUES (?, ?, ?, ?, ?, ?, 0)
-  `;
-  
-  db.query(sql, [nome, descricao, criador_id, pais || null, linguas || null, privada ? 1 : 0], (err, result) => {
-    if (err) {
-      console.error("Erro ao criar comunidade:", err);
-      return res.status(500).json({ erro: "Erro ao criar comunidade" });
-    }
-    
-    // Auto-adicionar criador como membro
-    const membersql = "INSERT INTO comunidade_membros (comunidade_id, user_id) VALUES (?, ?)";
-    db.query(membersql, [result.insertId, criador_id], (err) => {
+  if (!nome || !descricao || !criador_id) return res.status(400).json({ erro: "Nome, descrição e criador_id são obrigatórios" });
+
+  db.query("INSERT INTO comunidades (nome, descricao, criador_id, pais, linguas, privada, verificada) VALUES (?, ?, ?, ?, ?, ?, 0)",
+    [nome, descricao, criador_id, pais || null, linguas || null, privada ? 1 : 0], (err, result) => {
+    if (err) { console.error("Erro ao criar comunidade:", err); return res.status(500).json({ erro: "Erro ao criar comunidade" }); }
+    db.query("INSERT INTO comunidade_membros (comunidade_id, user_id) VALUES (?, ?)", [result.insertId, criador_id], (err) => {
       if (err) console.error("Erro ao adicionar criador como membro:", err);
     });
-    
-    res.status(201).json({
-      sucesso: true,
-      id: result.insertId,
-      mensagem: "Comunidade criada! Aguarde aprovação do admin."
-    });
+    res.status(201).json({ sucesso: true, id: result.insertId, mensagem: "Comunidade criada! Aguarde aprovação do admin." });
   });
 });
 
-// POST /api/comunidades/:id/join - entrar numa comunidade
 app.post("/api/comunidades/:id/join", authenticateJWT, (req, res) => {
   const { id } = req.params;
   const { userId } = req.body;
-  
-  if (!userId) {
-    return res.status(400).json({ erro: "userId é obrigatório" });
-  }
-  
-  const sql = "INSERT INTO comunidade_membros (comunidade_id, user_id) VALUES (?, ?)";
-  
-  db.query(sql, [id, userId], (err) => {
+  if (!userId) return res.status(400).json({ erro: "userId é obrigatório" });
+
+  db.query("INSERT INTO comunidade_membros (comunidade_id, user_id) VALUES (?, ?)", [id, userId], (err) => {
     if (err) {
-      if (err.code === 'ER_DUP_ENTRY') {
-        return res.status(400).json({ erro: "Você já é membro desta comunidade" });
-      }
+      if (err.code === 'ER_DUP_ENTRY') return res.status(400).json({ erro: "Você já é membro desta comunidade" });
       console.error("Erro ao entrar na comunidade:", err);
       return res.status(500).json({ erro: "Erro ao entrar na comunidade" });
     }
@@ -1944,95 +1562,46 @@ app.post("/api/comunidades/:id/join", authenticateJWT, (req, res) => {
   });
 });
 
-// POST /api/comunidades/:id/leave - sair de uma comunidade
 app.post("/api/comunidades/:id/leave", authenticateJWT, (req, res) => {
   const { id } = req.params;
   const { userId } = req.body;
-  
-  if (!userId) {
-    return res.status(400).json({ erro: "userId é obrigatório" });
-  }
-  
-  const sql = "DELETE FROM comunidade_membros WHERE comunidade_id = ? AND user_id = ?";
-  
-  db.query(sql, [id, userId], (err) => {
-    if (err) {
-      console.error("Erro ao sair da comunidade:", err);
-      return res.status(500).json({ erro: "Erro ao sair da comunidade" });
-    }
+  if (!userId) return res.status(400).json({ erro: "userId é obrigatório" });
+
+  db.query("DELETE FROM comunidade_membros WHERE comunidade_id = ? AND user_id = ?", [id, userId], (err) => {
+    if (err) { console.error("Erro ao sair da comunidade:", err); return res.status(500).json({ erro: "Erro ao sair da comunidade" }); }
     res.json({ sucesso: true, mensagem: "Saiu da comunidade com sucesso" });
   });
 });
 
-// POST /api/comunidades/:id/mensagens - enviar mensagem
 app.post("/api/comunidades/:id/mensagens", authenticateJWT, (req, res) => {
   const { id } = req.params;
   const { userId, mensagem } = req.body;
-  
-  if (!userId || !mensagem) {
-    return res.status(400).json({ erro: "userId e mensagem são obrigatórios" });
-  }
-  
-  const sql = "INSERT INTO comunidade_mensagens (comunidade_id, user_id, mensagem) VALUES (?, ?, ?)";
-  
-  db.query(sql, [id, userId, mensagem], (err, result) => {
-    if (err) {
-      console.error("Erro ao enviar mensagem:", err);
-      return res.status(500).json({ erro: "Erro ao enviar mensagem" });
-    }
-    res.status(201).json({
-      sucesso: true,
-      id: result.insertId,
-      mensagem: "Mensagem enviada com sucesso"
-    });
+  if (!userId || !mensagem) return res.status(400).json({ erro: "userId e mensagem são obrigatórios" });
+
+  db.query("INSERT INTO comunidade_mensagens (comunidade_id, user_id, mensagem) VALUES (?, ?, ?)", [id, userId, mensagem], (err, result) => {
+    if (err) { console.error("Erro ao enviar mensagem:", err); return res.status(500).json({ erro: "Erro ao enviar mensagem" }); }
+    res.status(201).json({ sucesso: true, id: result.insertId, mensagem: "Mensagem enviada com sucesso" });
   });
 });
 
-// GET /api/comunidades/:id/mensagens - obter mensagens
 app.get("/api/comunidades/:id/mensagens", authenticateJWT, (req, res) => {
   const { id } = req.params;
-  
-  const sql = `
-    SELECT cm.*, u.userName as user_nome
-    FROM comunidade_mensagens cm
-    LEFT JOIN users u ON cm.user_id = u.id_users
-    WHERE cm.comunidade_id = ?
-    ORDER BY cm.criada_em ASC
-  `;
-  
+  const sql = `SELECT cm.*, u.userName as user_nome FROM comunidade_mensagens cm LEFT JOIN users u ON cm.user_id = u.id_users WHERE cm.comunidade_id = ? ORDER BY cm.criada_em ASC`;
   db.query(sql, [id], (err, results) => {
-    if (err) {
-      console.error("Erro ao obter mensagens:", err);
-      return res.status(500).json({ erro: "Erro ao obter mensagens" });
-    }
+    if (err) { console.error("Erro ao obter mensagens:", err); return res.status(500).json({ erro: "Erro ao obter mensagens" }); }
     res.json(results || []);
   });
 });
 
-// GET /api/comunidades/:id/membros - obter membros
 app.get("/api/comunidades/:id/membros", authenticateJWT, (req, res) => {
   const { id } = req.params;
-  
-  const sql = `
-    SELECT cm.*, u.userName as user_nome, u.email
-    FROM comunidade_membros cm
-    LEFT JOIN users u ON cm.user_id = u.id_users
-    WHERE cm.comunidade_id = ?
-    ORDER BY cm.juntou_em ASC
-  `;
-  
+  const sql = `SELECT cm.*, u.userName as user_nome, u.email FROM comunidade_membros cm LEFT JOIN users u ON cm.user_id = u.id_users WHERE cm.comunidade_id = ? ORDER BY cm.juntou_em ASC`;
   db.query(sql, [id], (err, results) => {
-    if (err) {
-      console.error("Erro ao obter membros:", err);
-      return res.status(500).json({ erro: "Erro ao obter membros" });
-    }
+    if (err) { console.error("Erro ao obter membros:", err); return res.status(500).json({ erro: "Erro ao obter membros" }); }
     res.json(results || []);
   });
 });
 
-// ================== ENDPOINTS DE ADMIN ==================
-
-// GET /api/admin/comunidades - obter todas as comunidades (verificadas + pendentes)
 app.get("/api/admin/comunidades", authenticateJWT, (req, res) => {
   const sql = `
     SELECT c.*, u.userName as criador_nome,
@@ -2042,15 +1611,11 @@ app.get("/api/admin/comunidades", authenticateJWT, (req, res) => {
     ORDER BY c.verificada ASC, c.criada_em ASC
   `;
   db.query(sql, (err, results) => {
-    if (err) {
-      console.error("Erro ao obter comunidades:", err);
-      return res.status(500).json({ erro: "Erro ao obter comunidades" });
-    }
+    if (err) { console.error("Erro ao obter comunidades:", err); return res.status(500).json({ erro: "Erro ao obter comunidades" }); }
     res.json(results || []);
   });
 });
 
-// GET /api/admin/comunidades/pendentes - obter comunidades não verificadas
 app.get("/api/admin/comunidades/pendentes", authenticateJWT, (req, res) => {
   const sql = `
     SELECT c.*, u.userName as criador_nome,
@@ -2060,128 +1625,68 @@ app.get("/api/admin/comunidades/pendentes", authenticateJWT, (req, res) => {
     WHERE c.verificada = 0
     ORDER BY c.criada_em ASC
   `;
-  
   db.query(sql, (err, results) => {
-    if (err) {
-      console.error("Erro ao obter comunidades pendentes:", err);
-      return res.status(500).json({ erro: "Erro ao obter comunidades pendentes" });
-    }
+    if (err) { console.error("Erro ao obter comunidades pendentes:", err); return res.status(500).json({ erro: "Erro ao obter comunidades pendentes" }); }
     res.json(results || []);
   });
 });
 
-// POST /api/admin/comunidades/:id/verificar - verificar comunidade
 app.post("/api/admin/comunidades/:id/verificar", authenticateJWT, (req, res) => {
   const { id } = req.params;
-  
-  const sql = "UPDATE comunidades SET verificada = 1 WHERE id = ?";
-  
-  db.query(sql, [id], (err) => {
-    if (err) {
-      console.error("Erro ao verificar comunidade:", err);
-      return res.status(500).json({ erro: "Erro ao verificar comunidade" });
-    }
+  db.query("UPDATE comunidades SET verificada = 1 WHERE id = ?", [id], (err) => {
+    if (err) { console.error("Erro ao verificar comunidade:", err); return res.status(500).json({ erro: "Erro ao verificar comunidade" }); }
     res.json({ sucesso: true, mensagem: "Comunidade verificada com sucesso" });
   });
 });
 
-// POST /api/admin/comunidades/:id/rejeitar - rejeitar comunidade
 app.post("/api/admin/comunidades/:id/rejeitar", authenticateJWT, (req, res) => {
   const { id } = req.params;
-  
-  const sql = "DELETE FROM comunidades WHERE id = ?";
-  
-  db.query(sql, [id], (err) => {
-    if (err) {
-      console.error("Erro ao rejeitar comunidade:", err);
-      return res.status(500).json({ erro: "Erro ao rejeitar comunidade" });
-    }
+  db.query("DELETE FROM comunidades WHERE id = ?", [id], (err) => {
+    if (err) { console.error("Erro ao rejeitar comunidade:", err); return res.status(500).json({ erro: "Erro ao rejeitar comunidade" }); }
     res.json({ sucesso: true, mensagem: "Comunidade rejeitada" });
   });
 });
 
-// POST /api/admin/comunidades/:id/toggle - toggle verificação
 app.post("/api/admin/comunidades/:id/toggle", (req, res) => {
   const { id } = req.params;
   const { verificada } = req.body;
-  
-  const sql = "UPDATE comunidades SET verificada = ? WHERE id = ?";
-  
-  db.query(sql, [verificada ? 1 : 0, id], (err) => {
-    if (err) {
-      console.error("Erro ao toggle verificação:", err);
-      return res.status(500).json({ erro: "Erro ao atualizar verificação" });
-    }
+  db.query("UPDATE comunidades SET verificada = ? WHERE id = ?", [verificada ? 1 : 0, id], (err) => {
+    if (err) { console.error("Erro ao toggle verificação:", err); return res.status(500).json({ erro: "Erro ao atualizar verificação" }); }
     res.json({ sucesso: true, mensagem: "Status atualizado com sucesso" });
   });
 });
 
-// ================== RECUPERAÇÃO DE PASSWORD ==================
+// ================== RECUPERAÇÃO DE PASSWORD (novo fluxo) ==================
 
-// Passo 1: Solicitar código de recuperação
 app.post("/api/auth/forgot-password", (req, res) => {
   const { email } = req.body;
   if (!email) return res.status(400).json({ erro: "Email obrigatório" });
 
-  const sql = "SELECT id_users FROM users WHERE email = ?";
-  db.query(sql, [email], async (err, results) => {
+  db.query("SELECT id_users FROM users WHERE email = ?", [email], async (err, results) => {
     if (err) return res.status(500).json({ erro: "Erro na base de dados" });
-    if (results.length === 0) {
-      // Resposta genérica para não revelar se o email existe
-      return res.json({ sucesso: true });
-    }
+    if (results.length === 0) return res.json({ sucesso: true });
 
     const code = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiry = Date.now() + 15 * 60 * 1000; // 15 minutos
+    const expiry = Date.now() + 15 * 60 * 1000;
     resetCodes.set(email.toLowerCase(), { code, expiry });
 
-    // Enviar email
-    try {
-      await emailTransporter.sendMail({
-        from: `"GoLift" <${process.env.EMAIL_USER}>`,
-        to: email,
-        subject: "Código de Recuperação de Password — GoLift",
-        html: `
-          <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 24px; background: #f9f9f9; border-radius: 12px;">
-            <h2 style="color: #111; text-align: center;">Recuperação de Password</h2>
-            <p style="color: #555;">Olá,</p>
-            <p style="color: #555;">Recebemos um pedido para redefinir a password da tua conta GoLift.</p>
-            <p style="color: #555;">Usa o seguinte código (válido por <strong>15 minutos</strong>):</p>
-            <div style="text-align: center; margin: 32px 0;">
-              <span style="font-size: 36px; font-weight: bold; letter-spacing: 8px; color: #111; background: #e5e7eb; padding: 16px 24px; border-radius: 8px;">${code}</span>
-            </div>
-            <p style="color: #999; font-size: 12px;">Se não fizeste este pedido, podes ignorar este email.</p>
-          </div>
-        `,
-      });
-
-      console.log(`[Password Reset] Código enviado para ${email}`);
-      res.json({ sucesso: true });
-    } catch (emailErr) {
-      console.error("[Password Reset] Erro ao enviar email:", emailErr.message);
-      console.log(`[Password Reset] Código de teste para ${email}: ${code}`);
-      res.json({ sucesso: true, codigo_teste: code });
-    }
+    console.log(`[Password Reset] Código para ${email}: ${code}`);
+    res.json({ sucesso: true, codigo_teste: code });
   });
 });
 
-// Passo 2: Verificar código
 app.post("/api/auth/verify-reset-code", (req, res) => {
   const { email, code } = req.body;
   if (!email || !code) return res.status(400).json({ erro: "Email e código obrigatórios" });
 
   const entry = resetCodes.get(email.toLowerCase());
   if (!entry) return res.status(400).json({ erro: "Nenhum pedido de recuperação encontrado" });
-  if (Date.now() > entry.expiry) {
-    resetCodes.delete(email.toLowerCase());
-    return res.status(400).json({ erro: "Código expirado. Solicita um novo." });
-  }
+  if (Date.now() > entry.expiry) { resetCodes.delete(email.toLowerCase()); return res.status(400).json({ erro: "Código expirado. Solicita um novo." }); }
   if (entry.code !== code) return res.status(400).json({ erro: "Código inválido" });
 
   res.json({ sucesso: true });
 });
 
-// Passo 3: Redefinir password
 app.post("/api/auth/reset-password", async (req, res) => {
   const { email, code, newPassword } = req.body;
   if (!email || !code || !newPassword) return res.status(400).json({ erro: "Dados incompletos" });
@@ -2189,10 +1694,7 @@ app.post("/api/auth/reset-password", async (req, res) => {
 
   const entry = resetCodes.get(email.toLowerCase());
   if (!entry) return res.status(400).json({ erro: "Nenhum pedido de recuperação encontrado" });
-  if (Date.now() > entry.expiry) {
-    resetCodes.delete(email.toLowerCase());
-    return res.status(400).json({ erro: "Código expirado. Solicita um novo." });
-  }
+  if (Date.now() > entry.expiry) { resetCodes.delete(email.toLowerCase()); return res.status(400).json({ erro: "Código expirado. Solicita um novo." }); }
   if (entry.code !== code) return res.status(400).json({ erro: "Código inválido" });
 
   try {
@@ -2210,13 +1712,10 @@ app.post("/api/auth/reset-password", async (req, res) => {
 
 // ================== STRIPE CHECKOUT ==================
 
-// Criar sessão de checkout
 app.post("/api/stripe/checkout-session", async (req, res) => {
   const { userId } = req.body;
   if (!userId) return res.status(400).json({ erro: "userId obrigatório" });
 
-  // Stripe exige URLs HTTPS válidas. Usa SERVER_URL do .env, ou deriva do pedido.
-  // exp:// e http:// locais não funcionam em produção com Stripe.
   const baseUrl = process.env.SERVER_URL ||
     (process.env.APP_URL && process.env.APP_URL.startsWith("https://")
       ? process.env.APP_URL
@@ -2225,6 +1724,7 @@ app.post("/api/stripe/checkout-session", async (req, res) => {
   console.log("[Stripe] Base URL para redirect:", baseUrl);
 
   try {
+    const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
     const session = await stripe.checkout.sessions.create({
       mode: "subscription",
       payment_method_types: ["card"],
@@ -2240,37 +1740,29 @@ app.post("/api/stripe/checkout-session", async (req, res) => {
   }
 });
 
-// Verificar plano do utilizador
 app.get("/api/plano/:userId", (req, res) => {
   const { userId } = req.params;
-  db.query(
-    "SELECT plano, plano_ativo_ate FROM users WHERE id_users = ?",
-    [userId],
-    (err, rows) => {
-      if (err) return res.status(500).json({ erro: "Erro na base de dados" });
-      if (!rows.length) return res.status(404).json({ erro: "Utilizador não encontrado" });
+  db.query("SELECT plano, plano_ativo_ate FROM users WHERE id_users = ?", [userId], (err, rows) => {
+    if (err) return res.status(500).json({ erro: "Erro na base de dados" });
+    if (!rows.length) return res.status(404).json({ erro: "Utilizador não encontrado" });
 
-      const user = rows[0];
-      const agora = new Date();
-      const ativo = user.plano === "pago" && (!user.plano_ativo_ate || new Date(user.plano_ativo_ate) > agora);
+    const user = rows[0];
+    const agora = new Date();
+    const ativo = user.plano === "pago" && (!user.plano_ativo_ate || new Date(user.plano_ativo_ate) > agora);
 
-      // Se expirou, reverter para free
-      if (user.plano === "pago" && !ativo) {
-        db.query("UPDATE users SET plano = 'free' WHERE id_users = ?", [userId]);
-      }
-
-      res.json({ plano: ativo ? "pago" : "free", ativo_ate: user.plano_ativo_ate });
+    if (user.plano === "pago" && !ativo) {
+      db.query("UPDATE users SET plano = 'free' WHERE id_users = ?", [userId]);
     }
-  );
+
+    res.json({ plano: ativo ? "pago" : "free", ativo_ate: user.plano_ativo_ate });
+  });
 });
 
 // ================== AI — RELATÓRIO SEMANAL ==================
 
-// Obter relatório da semana passada (cached ou gerar)
 app.get("/api/ai/report/:userId", limiterAI, async (req, res) => {
   const { userId } = req.params;
 
-  // Verificar plano
   const userRow = await new Promise((resolve) => {
     db.query("SELECT plano, plano_ativo_ate FROM users WHERE id_users = ?", [userId], (err, rows) => {
       if (err) { console.error("[AI report] DB err:", err.message); return resolve(null); }
@@ -2282,36 +1774,26 @@ app.get("/api/ai/report/:userId", limiterAI, async (req, res) => {
   const temPlano = userRow.plano === "pago" && (!userRow.plano_ativo_ate || new Date(userRow.plano_ativo_ate) > agora);
   if (!temPlano) return res.status(403).json({ erro: "Plano GoLift Pro necessário", codigo: "PLANO_NECESSARIO" });
 
-  // Calcular semana passada (segunda-feira a domingo)
   const hoje = new Date();
-  const diaSemana = hoje.getDay(); // 0=Dom, 1=Seg...
-  // Dias desde a segunda-feira desta semana
+  const diaSemana = hoje.getDay();
   const diasDesdeSegunda = diaSemana === 0 ? 6 : diaSemana - 1;
-  // Segunda da semana passada
   const segundaPassada = new Date(hoje);
   segundaPassada.setDate(hoje.getDate() - diasDesdeSegunda - 7);
   segundaPassada.setHours(0, 0, 0, 0);
-  // Domingo da semana passada (6 dias depois da segunda)
   const domingoPassado = new Date(segundaPassada);
   domingoPassado.setDate(segundaPassada.getDate() + 6);
   domingoPassado.setHours(23, 59, 59, 999);
   const semanaInicio = segundaPassada.toISOString().split("T")[0];
-  console.log(`[AI report] Semana passada: ${semanaInicio} a ${domingoPassado.toISOString().split('T')[0]}, userId=${userId}`);
 
-  // Verificar cache
   const cached = await new Promise((resolve) => {
-    db.query(
-      "SELECT conteudo FROM ai_reports WHERE user_id = ? AND semana_inicio = ?",
-      [userId, semanaInicio],
-      (err, rows) => resolve(err || !rows.length ? null : rows[0].conteudo)
-    );
+    db.query("SELECT conteudo FROM ai_reports WHERE user_id = ? AND semana_inicio = ?", [userId, semanaInicio],
+      (err, rows) => resolve(err || !rows.length ? null : rows[0].conteudo));
   });
   if (cached) {
     try { return res.json({ sucesso: true, relatorio: JSON.parse(cached), semana_inicio: semanaInicio, cached: true }); }
     catch { return res.json({ sucesso: true, relatorio: cached, semana_inicio: semanaInicio, cached: true }); }
   }
 
-  // Recolher dados da semana passada
   const treinos = await new Promise((resolve) => {
     db.query(
       `SELECT ts.id_sessao, ts.data_fim AS data_inicio, ts.duracao_segundos,
@@ -2332,11 +1814,8 @@ app.get("/api/ai/report/:userId", limiterAI, async (req, res) => {
   });
 
   const perfil = await new Promise((resolve) => {
-    db.query(
-      "SELECT userName, peso, altura, idade FROM users WHERE id_users = ?",
-      [userId],
-      (err, rows) => resolve(err || !rows.length ? {} : rows[0])
-    );
+    db.query("SELECT userName, peso, altura, idade FROM users WHERE id_users = ?", [userId],
+      (err, rows) => resolve(err || !rows.length ? {} : rows[0]));
   });
 
   if (treinos.length === 0) {
@@ -2354,7 +1833,6 @@ app.get("/api/ai/report/:userId", limiterAI, async (req, res) => {
     });
   }
 
-  // Construir prompt
   const treinosSummary = treinos.map((t, i) => {
     const data = new Date(t.data_inicio).toLocaleDateString("pt-PT", { weekday: "long", day: "2-digit", month: "2-digit" });
     const duracao = t.duracao_segundos ? `${Math.round(t.duracao_segundos / 60)} min` : "duração desconhecida";
@@ -2380,11 +1858,8 @@ Responde APENAS com JSON válido (sem markdown, sem código blocks) com exatamen
   try {
     const gorqResp = await gorqGenerate({ prompt, type: "report" });
     const relatorio = gorqResp.relatorio || gorqResp;
-    db.query(
-      "INSERT INTO ai_reports (user_id, semana_inicio, conteudo) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE conteudo = VALUES(conteudo)",
-      [userId, semanaInicio, JSON.stringify(relatorio)]
-    );
-    console.log(`[AI][GORQ] Relatório gerado para user ${userId} semana ${semanaInicio}`);
+    db.query("INSERT INTO ai_reports (user_id, semana_inicio, conteudo) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE conteudo = VALUES(conteudo)",
+      [userId, semanaInicio, JSON.stringify(relatorio)]);
     res.json({ sucesso: true, relatorio, semana_inicio: semanaInicio, cached: false });
   } catch (err) {
     console.error("[AI][GORQ] Erro ao gerar relatório:", err.message);
@@ -2394,7 +1869,6 @@ Responde APENAS com JSON válido (sem markdown, sem código blocks) com exatamen
 
 // ================== AI — PLANO MENSAL ==================
 
-// Obter plano do mês atual (cached ou null)
 app.get("/api/ai/plan/:userId", limiterAI, async (req, res) => {
   const { userId } = req.params;
 
@@ -2412,11 +1886,8 @@ app.get("/api/ai/plan/:userId", limiterAI, async (req, res) => {
   const mesAtual = `${agora.getFullYear()}-${String(agora.getMonth() + 1).padStart(2, "0")}`;
 
   const cached = await new Promise((resolve) => {
-    db.query(
-      "SELECT conteudo, criado_em FROM ai_planos WHERE user_id = ? AND mes = ?",
-      [userId, mesAtual],
-      (err, rows) => resolve(err || !rows.length ? null : rows[0])
-    );
+    db.query("SELECT conteudo, criado_em FROM ai_planos WHERE user_id = ? AND mes = ?", [userId, mesAtual],
+      (err, rows) => resolve(err || !rows.length ? null : rows[0]));
   });
 
   if (cached) {
@@ -2427,13 +1898,11 @@ app.get("/api/ai/plan/:userId", limiterAI, async (req, res) => {
   res.json({ sucesso: true, plano: null, mes: mesAtual, pode_gerar: true });
 });
 
-// Gerar plano do mês
-
 app.post("/api/ai/plan/:userId/generate", limiterAI, authenticateJWT, async (req, res) => {
   const { userId } = req.params;
   const { diasPorSemana = 4 } = req.body;
+  const agora = new Date(); // ← CORRIGIDO: declarado localmente
 
-  // Buscar info do utilizador alvo
   const userRow = await new Promise((resolve) => {
     db.query("SELECT plano, plano_ativo_ate, peso, altura, idade, id_tipoUser FROM users WHERE id_users = ?", [userId], (err, rows) => {
       if (err) { console.error("[AI plan POST] DB err:", err.message); return resolve(null); }
@@ -2442,10 +1911,7 @@ app.post("/api/ai/plan/:userId/generate", limiterAI, authenticateJWT, async (req
   });
   if (!userRow) return res.status(404).json({ erro: "Utilizador não encontrado" });
 
-  // Se quem faz o pedido for admin, ignora restrições de plano
-  // req.user.tipo vem do JWT (ver auth.middleware.js)
   if (!(req.user && req.user.tipo === 1)) {
-    const agora = new Date();
     const temPlano = userRow.plano === "pago" && (!userRow.plano_ativo_ate || new Date(userRow.plano_ativo_ate) > agora);
     if (!temPlano) return res.status(403).json({ erro: "Plano GoLift Pro necessário", codigo: "PLANO_NECESSARIO" });
   }
@@ -2453,15 +1919,13 @@ app.post("/api/ai/plan/:userId/generate", limiterAI, authenticateJWT, async (req
   const mesAtual = `${agora.getFullYear()}-${String(agora.getMonth() + 1).padStart(2, "0")}`;
   const mesNome = agora.toLocaleDateString("pt-PT", { month: "long", year: "numeric" });
 
-  // Verificar se já gerou este mês
   const existe = await new Promise((resolve) => {
-    db.query("SELECT id FROM ai_planos WHERE user_id = ? AND mes = ?", [userId, mesAtual], (err, rows) => {
-      resolve(!err && rows.length > 0);
-    });
+    db.query("SELECT id FROM ai_planos WHERE user_id = ? AND mes = ?", [userId, mesAtual],
+      (err, rows) => resolve(!err && rows.length > 0));
   });
   if (existe) return res.status(400).json({ erro: "Já geraste o plano deste mês." });
 
-  const prompt = `Cria um plano de treino semanal para ${mesNome} para um utilizador com:
+  const prompt = `Cria um plano de treino semanal para ${mesNome} para um utilizador com ${userRow.peso || "?"}kg, ${userRow.altura || "?"}cm, ${userRow.idade || "?"}anos.
 
 Responde APENAS com JSON válido (sem markdown, sem código blocks) com exatamente esta estrutura:
 {
@@ -2481,12 +1945,10 @@ Inclui apenas os ${diasPorSemana} dias de treino (sem dias de descanso no array)
   try {
     const gorqResp = await gorqGenerate({ prompt, type: "plan", diasPorSemana });
     const plano = gorqResp.plano || gorqResp;
-    db.query(
-      "INSERT INTO ai_planos (user_id, mes, conteudo) VALUES (?, ?, ?)",
+    db.query("INSERT INTO ai_planos (user_id, mes, conteudo) VALUES (?, ?, ?)",
       [userId, mesAtual, JSON.stringify(plano)],
       (err) => {
         if (err) { console.error("[AI][GORQ] Erro ao guardar plano:", err); return res.status(500).json({ erro: "Erro ao guardar plano" }); }
-        console.log(`[AI][GORQ] Plano gerado para user ${userId} mês ${mesAtual}`);
         res.json({ sucesso: true, plano, mes: mesAtual, pode_gerar: false });
       }
     );
@@ -2496,31 +1958,30 @@ Inclui apenas os ${diasPorSemana} dias de treino (sem dias de descanso no array)
   }
 });
 
-// Helper: detectar grupo muscular a partir do nome do exercício (PT)
 function detectarGrupoMuscular(nome) {
   const n = nome.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   const map = [
-    { grupo: "Peito",          sub: "Peito Médio",        kw: ["peito","press de peito","flexao de peito","supino"] },
-    { grupo: "Peito",          sub: "Peito Superior",     kw: ["peito superior","inclinado","incline","upper chest"] },
-    { grupo: "Peito",          sub: "Peito Inferior",     kw: ["peito inferior","declinado","decline"] },
-    { grupo: "Costas",         sub: "Dorsal",             kw: ["puxada","remada","lat pull","pulley","dorsal","grande dorsal"] },
-    { grupo: "Costas",         sub: "Trapézio",           kw: ["trapezio","encolhimento","shrug"] },
-    { grupo: "Costas",         sub: "Rombóide",           kw: ["romboide","face pull","retração"] },
-    { grupo: "Ombros",         sub: "Deltóide Anterior",  kw: ["elevacao frontal","deltoi anterior","front raise"] },
-    { grupo: "Ombros",         sub: "Deltóide Lateral",   kw: ["elevacao lateral","crucifixo invertido","lateral raise"] },
-    { grupo: "Ombros",         sub: "Deltóide Posterior", kw: ["deltoi posterior","bird","reverse fly","posterior"] },
-    { grupo: "Ombros",         sub: "Ombros",             kw: ["ombro","press de ombros","desenvolvimento","military press","press arnold","upright row"] },
-    { grupo: "Bíceps",         sub: "Bíceps",             kw: ["bicep","curl","martelo","rosca"] },
-    { grupo: "Tríceps",        sub: "Tríceps",            kw: ["tricep","extensao","testa","skull","dips","mergulho","push down","kickback"] },
-    { grupo: "Antebraços",     sub: "Antebraços",         kw: ["antebraco","pulso","wrist","grip"] },
-    { grupo: "Quadríceps",     sub: "Quadríceps",         kw: ["quadricep","agachamento","leg press","extensao de pernas","lunges","afundo","hack squat","goblet","sissy"] },
-    { grupo: "Isquiotibiais",  sub: "Isquiotibiais",      kw: ["isquio","peso morto romeno","leg curl","flexao de pernas","deadlift romeno","hamstring"] },
-    { grupo: "Glúteos",        sub: "Glúteos",            kw: ["gluteo","hip thrust","pontes","elevacao de quadril","abducao","kickback glut","donkey"] },
-    { grupo: "Gémeos",         sub: "Gémeos",             kw: ["gemeo","panturrilha","calf","plantarflexao"] },
-    { grupo: "Abdómen",        sub: "Abdómen",            kw: ["abdomen","abdominal","prancha","plank","crunch","sit up","russian twist","rollout","hollow","mountain climber","leg raise","elevacao de pernas"] },
-    { grupo: "Lombar",         sub: "Lombar",             kw: ["lombar","hiperextensao","deadlift","peso morto","superman","bird dog","back extension"] },
-    { grupo: "Full Body",      sub: "Funcional",          kw: ["burpee","clean","snatch","thruster","turkish","kettlebell","kettlebell swing","wall ball","box jump","swing","bear crawl"] },
-    { grupo: "Cardio",         sub: "Cardio",             kw: ["corrida","bicicleta","remo ergometro","passadeira","eliptica","cardio","hiit","salto","corda","spinning","jump rope","step"] },
+    { grupo: "Peito",         sub: "Peito Médio",        kw: ["peito","press de peito","flexao de peito","supino"] },
+    { grupo: "Peito",         sub: "Peito Superior",     kw: ["peito superior","inclinado","incline","upper chest"] },
+    { grupo: "Peito",         sub: "Peito Inferior",     kw: ["peito inferior","declinado","decline"] },
+    { grupo: "Costas",        sub: "Dorsal",             kw: ["puxada","remada","lat pull","pulley","dorsal","grande dorsal"] },
+    { grupo: "Costas",        sub: "Trapézio",           kw: ["trapezio","encolhimento","shrug"] },
+    { grupo: "Costas",        sub: "Rombóide",           kw: ["romboide","face pull","retração"] },
+    { grupo: "Ombros",        sub: "Deltóide Anterior",  kw: ["elevacao frontal","deltoi anterior","front raise"] },
+    { grupo: "Ombros",        sub: "Deltóide Lateral",   kw: ["elevacao lateral","crucifixo invertido","lateral raise"] },
+    { grupo: "Ombros",        sub: "Deltóide Posterior", kw: ["deltoi posterior","bird","reverse fly","posterior"] },
+    { grupo: "Ombros",        sub: "Ombros",             kw: ["ombro","press de ombros","desenvolvimento","military press","press arnold","upright row"] },
+    { grupo: "Bíceps",        sub: "Bíceps",             kw: ["bicep","curl","martelo","rosca"] },
+    { grupo: "Tríceps",       sub: "Tríceps",            kw: ["tricep","extensao","testa","skull","dips","mergulho","push down","kickback"] },
+    { grupo: "Antebraços",    sub: "Antebraços",         kw: ["antebraco","pulso","wrist","grip"] },
+    { grupo: "Quadríceps",    sub: "Quadríceps",         kw: ["quadricep","agachamento","leg press","extensao de pernas","lunges","afundo","hack squat","goblet","sissy"] },
+    { grupo: "Isquiotibiais", sub: "Isquiotibiais",      kw: ["isquio","peso morto romeno","leg curl","flexao de pernas","deadlift romeno","hamstring"] },
+    { grupo: "Glúteos",       sub: "Glúteos",            kw: ["gluteo","hip thrust","pontes","elevacao de quadril","abducao","kickback glut","donkey"] },
+    { grupo: "Gémeos",        sub: "Gémeos",             kw: ["gemeo","panturrilha","calf","plantarflexao"] },
+    { grupo: "Abdómen",       sub: "Abdómen",            kw: ["abdomen","abdominal","prancha","plank","crunch","sit up","russian twist","rollout","hollow","mountain climber","leg raise","elevacao de pernas"] },
+    { grupo: "Lombar",        sub: "Lombar",             kw: ["lombar","hiperextensao","deadlift","peso morto","superman","bird dog","back extension"] },
+    { grupo: "Full Body",     sub: "Funcional",          kw: ["burpee","clean","snatch","thruster","turkish","kettlebell","kettlebell swing","wall ball","box jump","swing","bear crawl"] },
+    { grupo: "Cardio",        sub: "Cardio",             kw: ["corrida","bicicleta","remo ergometro","passadeira","eliptica","cardio","hiit","salto","corda","spinning","jump rope","step"] },
   ];
   for (const entry of map) {
     for (const kw of entry.kw) {
@@ -2530,7 +1991,6 @@ function detectarGrupoMuscular(nome) {
   return { grupo_tipo: "Outros", sub_tipo: "Geral" };
 }
 
-// ================== IMPORT AI PLAN DAY TO WORKOUTS ==================
 app.post("/api/ai/plan/:userId/import-day", (req, res) => {
   const { userId } = req.params;
   const { dia, foco, exercicios } = req.body;
@@ -2541,107 +2001,63 @@ app.post("/api/ai/plan/:userId/import-day", (req, res) => {
 
   const nomeTreino = `${dia} — ${foco || "IA"}`;
 
-  // Helper: find or create exercise by name
   const getOrCreateExercicio = (nome, cb) => {
     db.query("SELECT id_exercicio FROM exercicios WHERE nome = ? LIMIT 1", [nome], (err, rows) => {
       if (err) return cb(err);
       if (rows.length > 0) return cb(null, rows[0].id_exercicio);
       const { grupo_tipo, sub_tipo } = detectarGrupoMuscular(nome);
-      db.query(
-        "INSERT INTO exercicios (nome, grupo_tipo, sub_tipo) VALUES (?, ?, ?)",
-        [nome, grupo_tipo, sub_tipo],
-        (err2, result) => {
-          if (err2) return cb(err2);
-          cb(null, result.insertId);
-        }
-      );
+      db.query("INSERT INTO exercicios (nome, grupo_tipo, sub_tipo) VALUES (?, ?, ?)", [nome, grupo_tipo, sub_tipo], (err2, result) => {
+        if (err2) return cb(err2);
+        cb(null, result.insertId);
+      });
     });
   };
 
-  // Get next treino id
   db.query("SELECT IFNULL(MAX(id_treino), 0) + 1 AS next_id FROM treino", (err, rows) => {
     if (err) return res.status(500).json({ erro: "Erro DB" });
     const nextId = rows[0].next_id;
 
-    db.query(
-      "INSERT INTO treino (id_treino, id_users, nome, data_treino, is_ia) VALUES (?, ?, ?, NOW(), 1)",
-      [nextId, userId, nomeTreino],
-      (err2) => {
-        if (err2) return res.status(500).json({ erro: "Erro ao criar treino" });
+    db.query("INSERT INTO treino (id_treino, id_users, nome, data_treino, is_ia) VALUES (?, ?, ?, NOW(), 1)",
+      [nextId, userId, nomeTreino], (err2) => {
+      if (err2) return res.status(500).json({ erro: "Erro ao criar treino" });
 
-        // Process exercises sequentially
-        let index = 0;
-        const processNext = () => {
-          if (index >= exercicios.length) {
-            return res.json({ sucesso: true, id_treino: nextId, nome: nomeTreino });
-          }
-          const ex = exercicios[index++];
-          getOrCreateExercicio(ex.nome || ex.exercicio, (err3, idExercicio) => {
-            if (err3) return res.status(500).json({ erro: "Erro ao criar exercício" });
-
-            // Insert treino_exercicio link only — no series inserted
-            db.query(
-              "INSERT INTO treino_exercicio (id_treino, id_exercicio) VALUES (?, ?)",
-              [nextId, idExercicio],
-              (err4) => {
-                if (err4) return res.status(500).json({ erro: "Erro ao associar exercício" });
-                processNext();
-              }
-            );
+      let index = 0;
+      const processNext = () => {
+        if (index >= exercicios.length) {
+          return res.json({ sucesso: true, id_treino: nextId, nome: nomeTreino });
+        }
+        const ex = exercicios[index++];
+        getOrCreateExercicio(ex.nome || ex.exercicio, (err3, idExercicio) => {
+          if (err3) return res.status(500).json({ erro: "Erro ao criar exercício" });
+          db.query("INSERT INTO treino_exercicio (id_treino, id_exercicio) VALUES (?, ?)", [nextId, idExercicio], (err4) => {
+            if (err4) return res.status(500).json({ erro: "Erro ao associar exercício" });
+            processNext();
           });
-        };
-        processNext();
-      }
-    );
+        });
+      };
+      processNext();
+    });
   });
 });
 
-// ================== DAILY MOTIVATIONAL PHRASE ==================
 app.get("/api/daily-phrase", async (req, res) => {
-  // Check cache
   db.query("SELECT frase FROM daily_phrases WHERE data = CURDATE()", (err, rows) => {
-    if (err) {
-      console.error("[daily-phrase] Erro DB ao verificar cache:", err.message);
-    }
-    if (!err && rows.length > 0) {
-      return res.json({ frase: rows[0].frase, cached: true });
-    }
+    if (err) console.error("[daily-phrase] Erro DB ao verificar cache:", err.message);
+    if (!err && rows.length > 0) return res.json({ frase: rows[0].frase, cached: true });
 
-    // Generate new phrase
-    const prompt = `Gera uma frase motivacional curta (máximo 120 caracteres) para atletas e praticantes de fitness. A frase deve ser inspiradora, em português de Portugal, e adequada para o início do dia. Responde APENAS com a frase, sem aspas, sem explicação.`;
-
-    geminiGenerate(prompt)
-      .then((text) => {
-        const frase = (text || "").trim().replace(/^["']|["']$/g, "");
-        // Se Gemini devolveu texto vazio, usar mock
-        if (!frase) throw new Error("Gemini devolveu frase vazia");
-        console.log("[daily-phrase] Frase gerada por Gemini:", frase.substring(0, 50));
-        db.query(
-          "INSERT INTO daily_phrases (data, frase) VALUES (CURDATE(), ?) ON DUPLICATE KEY UPDATE frase = VALUES(frase)",
-          [frase],
-          () => res.json({ frase, cached: false })
-        );
-      })
-      .catch((err2) => {
-        console.warn("[daily-phrase] Gemini falhou, a usar mock:", err2.message);
-        const mockFrases = [
-          "O teu único limite és tu mesmo. Vai mais além.",
-          "Cada treino é um passo rumo à melhor versão de ti.",
-          "A consistência supera a intensidade. Aparece todos os dias.",
-          "Não treinas para ontem. Treinas para o que ainda está por vir.",
-          "Força não é o que consegues fazer. É superar o que pensavas não conseguir."
-        ];
-        const frase = mockFrases[new Date().getDate() % mockFrases.length];
-        db.query(
-          "INSERT INTO daily_phrases (data, frase) VALUES (CURDATE(), ?) ON DUPLICATE KEY UPDATE frase = VALUES(frase)",
-          [frase],
-          () => res.json({ frase, cached: false, mock: true })
-        );
-      });
+    const mockFrases = [
+      "O teu único limite és tu mesmo. Vai mais além.",
+      "Cada treino é um passo rumo à melhor versão de ti.",
+      "A consistência supera a intensidade. Aparece todos os dias.",
+      "Não treinas para ontem. Treinas para o que ainda está por vir.",
+      "Força não é o que consegues fazer. É superar o que pensavas não conseguir."
+    ];
+    const frase = mockFrases[new Date().getDate() % mockFrases.length];
+    db.query("INSERT INTO daily_phrases (data, frase) VALUES (CURDATE(), ?) ON DUPLICATE KEY UPDATE frase = VALUES(frase)",
+      [frase], () => res.json({ frase, cached: false, mock: true }));
   });
 });
 
-// ================== STRIPE BILLING PORTAL ==================
 app.post("/api/stripe/portal", async (req, res) => {
   const { userId } = req.body;
   if (!userId) return res.status(400).json({ erro: "userId obrigatório" });
@@ -2652,6 +2068,7 @@ app.post("/api/stripe/portal", async (req, res) => {
     if (!customerId) return res.status(400).json({ erro: "Sem subscrição ativa" });
 
     try {
+      const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
       const session = await stripe.billingPortal.sessions.create({
         customer: customerId,
         return_url: "exp://localhost:8081"
@@ -2664,8 +2081,6 @@ app.post("/api/stripe/portal", async (req, res) => {
   });
 });
 
-// ================== PAYMENT RETURN PAGE ==================
-// Stripe redireciona para cá após sucesso/cancelamento do checkout
 app.get("/payment-return", (req, res) => {
   const status = req.query.status === "sucesso" ? "sucesso" : "cancelado";
   const isSucesso = status === "sucesso";
@@ -2683,8 +2098,6 @@ app.get("/payment-return", (req, res) => {
     .icon { font-size: 64px; margin-bottom: 16px; }
     h1 { margin: 0 0 12px; font-size: 24px; }
     p { color: #aaa; margin: 0 0 24px; }
-    .btn { background: #e63946; color: #fff; border: none; padding: 14px 28px;
-           border-radius: 10px; font-size: 16px; cursor: pointer; text-decoration: none; display: inline-block; }
   </style>
 </head>
 <body>
@@ -2714,11 +2127,6 @@ app.listen(SERVER_PORT, '0.0.0.0', () => {
   console.log(`🔌 Porta: ${SERVER_PORT}`);
   console.log(`🌐 URL da API: http://${SERVER_IP}:${SERVER_PORT}`);
   console.log(`🔗 Localhost: http://localhost:${SERVER_PORT}`);
-  console.log('');
-  console.log('🤖 AUTO-CONFIGURAÇÃO DO CLIENTE:');
-  console.log('   📌 Rota: GET /api/server-info');
-  console.log('   ℹ️  Retorna o IP correto e URL da API automaticamente');
-  console.log(`   🔗 Teste: http://${SERVER_IP}:${SERVER_PORT}/api/server-info`);
   console.log('='.repeat(70) + '\n');
   setTimeout(() => {
     const testUrl = `http://localhost:${SERVER_PORT}/api/health`;
