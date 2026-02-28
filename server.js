@@ -1,66 +1,37 @@
-
-const fetch = require("node-fetch");
-const GORQ_API_KEY = process.env.GORQ_API_KEY ;
-const GORQ_BASE_URL = "https://api.gorq.ai/v1";
 // server.js — Clean, modular, professional
 require('dotenv').config();
-
-
-
-
-
-
+const fetch = require("node-fetch");
 
 // --- Segurança: JWT_SECRET obrigatório ---
 if (!process.env.JWT_SECRET || process.env.JWT_SECRET === 'golift_super_secret') {
-  console.error('[SECURITY] JWT_SECRET não definido ou inseguro. Define JWT_SECRET nas variáveis de ambiente.');
+  console.error('[SECURITY] JWT_SECRET não definido ou inseguro.');
   process.exit(1);
 }
 
+// --- Dependências principais ---
+const express = require('express');
+const cors    = require('cors');
+const helmet  = require('helmet');
+const http    = require('http');
+const os      = require('os');
 
+// --- Constantes GORQ ---
+const GORQ_API_KEY  = process.env.GORQ_API_KEY;
+const GORQ_BASE_URL = "https://api.gorq.ai/v1";
 
+// --- Inicialização do app ---
+const app = express();
+app.use(helmet());
 
+const allowedOrigins = process.env.NODE_ENV === 'production'
+  ? [process.env.CLIENT_URL, 'https://app.golift.pt']
+  : undefined;
 
-// ...existing code...
-// Initialize express app and middleware
+app.use(cors({ origin: allowedOrigins || '*', credentials: true }));
+app.use(express.json());
+app.set('trust proxy', 1);
 
-
-// ...existing code...
-
-
-
-
-// ...existing code...
-
-async function gorqGenerate({ prompt, type = "plan", diasPorSemana = 4 }) {
-  const endpoint = type === "plan" ? "/plan" : "/report";
-  const url = GORQ_BASE_URL + endpoint;
-  const body = {
-    prompt,
-    diasPorSemana,
-  };
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${GORQ_API_KEY}`,
-    },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error(`[GORQ] ${res.status} ${res.statusText}`);
-  return res.json();
-}
-
-
-
-
-
-// --- Segurança: JWT_SECRET obrigatório ---
-if (!process.env.JWT_SECRET || process.env.JWT_SECRET === 'golift_super_secret') {
-  console.error('[SECURITY] JWT_SECRET não definido ou inseguro. Define JWT_SECRET nas variáveis de ambiente.');
-  process.exit(1);
-}
-
+// --- SERVER_PORT / SERVER_IP ---
 const SERVER_PORT = process.env.PORT || 5000;
 const SERVER_IP = (() => {
   const interfaces = os.networkInterfaces();
@@ -80,80 +51,45 @@ const SERVER_IP = (() => {
   return wifiIP || ethernetIP || anyIP || virtualIP || 'localhost';
 })();
 
-
-
-// --- Dependências principais ---
-
-const cors = require('cors');
-const helmet = require('helmet');
-const http = require('http');
-const os = require('os');
-
-// --- Inicialização do app ---
-
-
-// --- Helmet: headers de segurança ---
-
-
-// --- CORS restrito em produção ---
-const allowedOrigins = process.env.NODE_ENV === 'production'
-  ? [process.env.CLIENT_URL, 'https://app.golift.pt']
-  : undefined;
-
-
-
-// --- Dependências principais ---
-const express = require('express');
-const cors = require('cors');
-const helmet = require('helmet');
-const http = require('http');
-const os = require('os');
-
-// --- Inicialização do app ---
-const app = express();
-app.use(helmet());
-const allowedOrigins = process.env.NODE_ENV === 'production'
-  ? [process.env.CLIENT_URL, 'https://app.golift.pt']
-  : undefined;
-app.use(cors({
-  origin: allowedOrigins || '*',
-  credentials: true
-}));
-app.use(express.json());
-app.set('trust proxy', 1);
+// --- gorqGenerate ---
+async function gorqGenerate({ prompt, type = "plan", diasPorSemana = 4 }) {
+  const url = GORQ_BASE_URL + (type === "plan" ? "/plan" : "/report");
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${GORQ_API_KEY}` },
+    body: JSON.stringify({ prompt, diasPorSemana }),
+  });
+  if (!res.ok) throw new Error(`[GORQ] ${res.status} ${res.statusText}`);
+  return res.json();
+}
 
 // --- Modular route imports ---
-const recordesRoutes = require('./routes/recordes/recordes.routes');
-const sessoesRoutes = require('./routes/sessoes/sessoes.routes');
-const utilsRoutes = require('./routes/utils/utils.routes');
-const planoRoutes = require('./routes/plano/plano.routes');
-const aiRoutes = require('./routes/ai/ai.routes');
-const stripeRoutes = require('./routes/stripe/stripe.routes');
-const comunidadeRoutes = require('./routes/comunidade/comunidade.routes');
-const treinoRoutes = require('./routes/treino/treino.routes');
-const authRoutes = require('./routes/auth/auth.routes');
-const userRoutes = require('./routes/user/user.routes');
-const adminRoutes = require('./routes/admin/admin.routes');
+const recordesRoutes  = require('./routes/recordes/recordes.routes');
+const sessoesRoutes   = require('./routes/sessoes/sessoes.routes');
+const utilsRoutes     = require('./routes/utils/utils.routes');
+const planoRoutes     = require('./routes/plano/plano.routes');
+const aiRoutes        = require('./routes/ai/ai.routes');
+const stripeRoutes    = require('./routes/stripe/stripe.routes');
+const comunidadeRoutes= require('./routes/comunidade/comunidade.routes');
+const treinoRoutes    = require('./routes/treino/treino.routes');
+const authRoutes      = require('./routes/auth/auth.routes');
+const userRoutes      = require('./routes/user/user.routes');
+const adminRoutes     = require('./routes/admin/admin.routes');
 
-// --- Registro das rotas ---
-app.use('/api', utilsRoutes);
-app.use('/api/recordes', recordesRoutes);
-app.use('/api/sessoes', sessoesRoutes);
-app.use('/api/plano', planoRoutes);
-app.use('/api/ai', aiRoutes);
-app.use('/api/stripe', stripeRoutes);
-app.use('/api/comunidades', comunidadeRoutes);
-app.use('/api/treinos', treinoRoutes);
-app.use('/api', authRoutes);
-app.use('/api/user', userRoutes);
-app.use('/api/admin', adminRoutes);
+// --- Registo das rotas ---
+app.use('/api',            utilsRoutes);
+app.use('/api/recordes',   recordesRoutes);
+app.use('/api/sessoes',    sessoesRoutes);
+app.use('/api/plano',      planoRoutes);
+app.use('/api/ai',         aiRoutes);
+app.use('/api/stripe',     stripeRoutes);
+app.use('/api/comunidades',comunidadeRoutes);
+app.use('/api/treinos',    treinoRoutes);
+app.use('/api',            authRoutes);
+app.use('/api/user',       userRoutes);
+app.use('/api/admin',      adminRoutes);
 
-// --- Centralizar logging seguro: nunca loggar PII, tokens, passwords ---
-// TODO: Rever todos os logs e garantir que não expõem dados sensíveis
-
-// --- Centralizar controlo de acesso: garantir isAdmin/isSelfOrAdmin em todas as rotas sensíveis ---
-// TODO: Rever todas as rotas e aplicar middleware de permissões onde necessário
-
+// ... resto das rotas inline a seguir ...
 
 // Rota para obter informações do servidor (para auto-config no cliente)
 app.get("/api/server-info", (req, res) => {
