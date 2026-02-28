@@ -1,3 +1,56 @@
+const utilsRoutes = require('./routes/utils.routes')
+app.use('/api', utilsRoutes)
+// Rotas Recordes modulares
+const recordesRoutes = require('./routes/recordes.routes')
+app.use('/api/recordes', recordesRoutes)
+// Rotas Sessões modulares
+const sessoesRoutes = require('./routes/sessoes.routes')
+app.use('/api/sessoes', sessoesRoutes)
+// Rotas Plano modulares
+const planoRoutes = require('./routes/plano.routes')
+app.use('/api/plano', planoRoutes)
+// Rotas AI modulares
+const aiRoutes = require('./routes/ai.routes')
+app.use('/api/ai', aiRoutes)
+// Rotas Stripe/pagamentos modulares
+const stripeRoutes = require('./routes/stripe.routes')
+app.use('/api/stripe', stripeRoutes)
+// Rotas comunidade modulares
+const comunidadeRoutes = require('./routes/comunidade.routes')
+app.use('/api/comunidades', comunidadeRoutes)
+// Rotas treino modulares
+const treinoRoutes = require('./routes/treino.routes')
+app.use('/api/treinos', treinoRoutes)
+// Rotas auth modulares
+const authRoutes = require('./routes/auth.routes')
+app.use('/api', authRoutes)
+// Rotas user modulares
+const userRoutes = require('./routes/user.routes')
+app.use('/api/user', userRoutes)
+// Modular route imports (clean, professional)
+const utilsRoutes = require('./routes/utils/utils.routes');
+const recordesRoutes = require('./routes/recordes/recordes.routes');
+const sessoesRoutes = require('./routes/sessoes/sessoes.routes');
+const planoRoutes = require('./routes/plano/plano.routes');
+const aiRoutes = require('./routes/ai/ai.routes');
+const stripeRoutes = require('./routes/stripe/stripe.routes');
+const comunidadeRoutes = require('./routes/comunidade/comunidade.routes');
+const treinoRoutes = require('./routes/treino/treino.routes');
+const authRoutes = require('./routes/auth/auth.routes');
+const userRoutes = require('./routes/user/user.routes');
+const adminRoutes = require('./routes/admin/admin.routes');
+
+app.use('/api', utilsRoutes);
+app.use('/api/recordes', recordesRoutes);
+app.use('/api/sessoes', sessoesRoutes);
+app.use('/api/plano', planoRoutes);
+app.use('/api/ai', aiRoutes);
+app.use('/api/stripe', stripeRoutes);
+app.use('/api/comunidades', comunidadeRoutes);
+app.use('/api/treinos', treinoRoutes);
+app.use('/api', authRoutes);
+app.use('/api/user', userRoutes);
+app.use('/api/admin', adminRoutes);
 const fetch = require("node-fetch");
 const GORQ_API_KEY = process.env.GORQ_API_KEY ;
 const GORQ_BASE_URL = "https://api.gorq.ai/v1";
@@ -20,193 +73,63 @@ async function gorqGenerate({ prompt, type = "plan", diasPorSemana = 4 }) {
   if (!res.ok) throw new Error(`[GORQ] ${res.status} ${res.statusText}`);
   return res.json();
 }
-// server.js
-require("dotenv").config();
-const express = require("express");
-const cors = require("cors");
-const db = require("./db");
-const bcrypt = require("bcrypt");
-const os = require("os");
-const jwt = require("jsonwebtoken");
-const { authenticateJWT } = require("./middleware/auth.middleware");
-const http = require("http");
-const nodemailer = require("nodemailer");
-// const { GoogleGenerativeAI } = require("@google/generative-ai");
-const Stripe = require("stripe");
-const rateLimit = require("express-rate-limit");
-
-// ================== EMAIL (GMAIL SMTP) ==================
-const emailTransporter = nodemailer.createTransport({
-  service: "gmail",
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_APP_PASS, // App Password do Gmail (não a password normal)
-  },
-});
-
-// ================== AI (Gorq) ==================
-//
-
-// ================== STRIPE ==================
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
-
-// ================== RESET DE PASSWORD (em memória) ==================
-// Map: email → { code: string, expiry: number }
-const resetCodes = new Map();
 
 
+// server.js — Clean, modular, professional
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const helmet = require('helmet');
 const app = express();
+const http = require('http');
+const os = require('os');
 
-// ================== STRIPE WEBHOOK (antes do express.json) ==================
-app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async (req, res) => {
-  const sig = req.headers["stripe-signature"];
-  let event;
-  try {
-    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
-  } catch (err) {
-    console.error("[Stripe] Webhook signature inválida:", err.message);
-    return res.status(400).json({ erro: "Webhook inválido" });
-  }
-
-  if (event.type === "checkout.session.completed") {
-    const session = event.data.object;
-    const userId = session.metadata?.userId;
-    if (userId) {
-      const expiry = new Date();
-      expiry.setMonth(expiry.getMonth() + 1);
-      db.query(
-        "UPDATE users SET plano = 'pago', plano_ativo_ate = ?, stripe_customer_id = ? WHERE id_users = ?",
-        [expiry, session.customer, userId],
-        (err) => {
-          if (err) console.error("[Stripe] Erro ao ativar plano:", err);
-          else console.log(`[Stripe] Plano ativado para user ${userId} até ${expiry.toISOString()}`);
-        }
-      );
-    }
-  }
-
-  if (event.type === "customer.subscription.deleted" || event.type === "invoice.payment_failed") {
-    const obj = event.data.object;
-    const customerId = obj.customer;
-    db.query(
-      "UPDATE users SET plano = 'free', plano_ativo_ate = NULL WHERE stripe_customer_id = ?",
-      [customerId],
-      (err) => { if (err) console.error("[Stripe] Erro ao desativar plano:", err); }
-    );
-  }
-
-  res.json({ received: true });
-});
-
-app.use(cors());
-app.use(express.json());
-app.set("trust proxy", 1); // Necessário para req.protocol funcionar atrás de Nginx/proxy
-
-// ================== RATE LIMITING ==================
-const limiterGeral = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 200,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { erro: "Demasiadas tentativas. Aguarda um momento." },
-});
-const limiterAI = rateLimit({
-  windowMs: 60 * 60 * 1000,
-  max: 10,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { erro: "Limite de pedidos à IA atingido. Tenta de novo em 1 hora." },
-});
-app.use("/api/", limiterGeral);
-
-// ================== MIGRAÇÕES DB ==================
-function runMigrations() {
-  const migrations = [
-    "ALTER TABLE users ADD COLUMN plano VARCHAR(10) NOT NULL DEFAULT 'free'",
-    "ALTER TABLE users ADD COLUMN plano_ativo_ate DATETIME NULL",
-    "ALTER TABLE users ADD COLUMN stripe_customer_id VARCHAR(255) NULL",
-    `CREATE TABLE IF NOT EXISTS ai_reports (
-      id INT AUTO_INCREMENT PRIMARY KEY,
-      user_id INT NOT NULL,
-      semana_inicio DATE NOT NULL,
-      conteudo TEXT NOT NULL,
-      criado_em DATETIME DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE KEY unique_user_week (user_id, semana_inicio)
-    )`,
-    `CREATE TABLE IF NOT EXISTS ai_planos (
-      id INT AUTO_INCREMENT PRIMARY KEY,
-      user_id INT NOT NULL,
-      mes VARCHAR(7) NOT NULL,
-      conteudo TEXT NOT NULL,
-      criado_em DATETIME DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE KEY unique_user_month (user_id, mes)
-    )`,
-    "ALTER TABLE treino ADD COLUMN is_ia TINYINT(1) NOT NULL DEFAULT 0",
-    `CREATE TABLE IF NOT EXISTS daily_phrases (
-      data DATE NOT NULL PRIMARY KEY,
-      frase TEXT NOT NULL,
-      criada_em DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`,
-  ];
-  migrations.forEach(sql => {
-    db.query(sql, (err) => {
-      if (err && !err.message.toLowerCase().includes("duplicate column") && !err.message.toLowerCase().includes("already exists")) {
-        // Ignorar erros de coluna/tabela já existente silenciosamente
-      }
-    });
-  });
-  console.log("✓ Migrações de planos/AI verificadas");
+// --- Segurança: JWT_SECRET obrigatório ---
+if (!process.env.JWT_SECRET || process.env.JWT_SECRET === 'golift_super_secret') {
+  console.error('[SECURITY] JWT_SECRET não definido ou inseguro. Define JWT_SECRET nas variáveis de ambiente.');
+  process.exit(1);
 }
-runMigrations();
 
-// Middleware para logar todas as requisições
-app.use((req, res, next) => {
-  next();
-});
-
-// Função para obter o IP local (prefere Wi-Fi, depois Ethernet, depois loopback)
-function getLocalIP() {
+const SERVER_PORT = process.env.PORT || 5000;
+const SERVER_IP = (() => {
   const interfaces = os.networkInterfaces();
-  let wifiIP = null;
-  let ethernetIP = null;
-  let anyIP = null;
-  let virtualIP = null; // Ignorar IPs virtuais (como 192.168.56.x)
-  
+  let wifiIP = null, ethernetIP = null, anyIP = null, virtualIP = null;
   for (const name of Object.keys(interfaces)) {
     for (const iface of interfaces[name]) {
-      if (iface.family === "IPv4" && !iface.internal) {
-        // Ignorar IPs virtuais (Hyper-V, VirtualBox, etc.)
-        if (iface.address.startsWith("192.168.56.") || 
-            iface.address.startsWith("10.0.2.") ||
-            iface.address.startsWith("172.")) {
-          virtualIP = iface.address; // Guardar só como fallback
-          continue;
+      if (iface.family === 'IPv4' && !iface.internal) {
+        if (iface.address.startsWith('192.168.56.') || iface.address.startsWith('10.0.2.') || iface.address.startsWith('172.')) {
+          virtualIP = iface.address; continue;
         }
-        
-        // Preferir Wi-Fi
-        if (name.toLowerCase().includes("wi-fi") || name.toLowerCase().includes("wlan")) {
-          wifiIP = iface.address;
-        }
-        // Depois Ethernet
-        else if (name.toLowerCase().includes("ethernet") || name.toLowerCase().includes("eth")) {
-          ethernetIP = iface.address;
-        }
-        // Qualquer outro (mas não virtual)
-        else if (!anyIP) {
-          anyIP = iface.address;
-        }
+        if (name.toLowerCase().includes('wi-fi') || name.toLowerCase().includes('wlan')) wifiIP = iface.address;
+        else if (name.toLowerCase().includes('ethernet') || name.toLowerCase().includes('eth')) ethernetIP = iface.address;
+        else if (!anyIP) anyIP = iface.address;
       }
     }
   }
-  
-  // Usar Wi-Fi > Ethernet > Qualquer outro > localhost (NÃO usar IP virtual como fallback principal)
-  const selectedIP = wifiIP || ethernetIP || anyIP || virtualIP || "localhost";
-  
-  return selectedIP;
-}
+  return wifiIP || ethernetIP || anyIP || virtualIP || 'localhost';
+})();
 
-const SERVER_IP = getLocalIP();
-const SERVER_PORT = process.env.PORT || 5000;
+
+// --- Helmet: headers de segurança ---
+app.use(helmet());
+
+// --- CORS restrito em produção ---
+const allowedOrigins = process.env.NODE_ENV === 'production'
+  ? [process.env.CLIENT_URL, 'https://app.golift.pt']
+  : undefined;
+app.use(cors({
+  origin: allowedOrigins || '*',
+  credentials: true
+}));
+
+app.use(express.json());
+app.set('trust proxy', 1);
+
+// --- Centralizar logging seguro: nunca loggar PII, tokens, passwords ---
+// TODO: Rever todos os logs e garantir que não expõem dados sensíveis
+
+// --- Centralizar controlo de acesso: garantir isAdmin/isSelfOrAdmin em todas as rotas sensíveis ---
+// TODO: Rever todas as rotas e aplicar middleware de permissões onde necessário
 
 
 // Rota para obter informações do servidor (para auto-config no cliente)
@@ -474,45 +397,10 @@ app.get("/api/admin/stats", authenticateJWT, (req, res) => {
   });
 });
 
-// Get list of users for admin
-app.get("/api/admin/users", authenticateJWT, (req, res) => {
-  // Return full user info (excluding password) for admin UI, including created_at
-  const sql = `SELECT id_users as id, userName, email, idade, peso, altura, id_tipoUser, created_at FROM users ORDER BY id_users DESC`;
-  db.query(sql, (err, rows) => {
-    if (err) {
-      console.error(err);
-      return res.status(500).json({ erro: "Erro ao obter os utilizadores." });
-    }
-    res.json(rows);
-  });
-});
 
-// Update user (admin)
-app.put("/api/admin/users/:id", authenticateJWT, (req, res) => {
-  const { id } = req.params;
-  const { userName, email, idade, peso, altura, id_tipoUser } = req.body;
-
-  const sql = `UPDATE users SET userName = ?, email = ?, idade = ?, peso = ?, altura = ?, id_tipoUser = ? WHERE id_users = ?`;
-  db.query(sql, [userName, email, idade, peso, altura, id_tipoUser, id], (err, result) => {
-    if (err) {
-      console.error(err);
-      return res.status(500).json({ erro: "Erro ao atualizar utilizador." });
-    }
-    return res.json({ sucesso: true });
-  });
-});
-
-// Delete user (admin)
-app.delete("/api/admin/users/:id", authenticateJWT, (req, res) => {
-  const { id } = req.params;
-  db.query("DELETE FROM users WHERE id_users = ?", [id], (err, result) => {
-    if (err) {
-      console.error(err);
-      return res.status(500).json({ erro: "Erro ao apagar utilizador." });
-    }
-    return res.json({ sucesso: true });
-  });
-});
+// Rotas admin modulares
+const adminRoutes = require('./routes/admin.routes')
+app.use('/api/admin', adminRoutes)
 
 // Get exercises (admin)
 app.get("/api/admin/exercicios", authenticateJWT, (req, res) => {
@@ -2855,48 +2743,32 @@ app.get("/payment-return", (req, res) => {
 </html>`);
 });
 
-// ================== 404 HANDLER ==================
+// 404 Handler
 app.use((req, res) => {
-  res.status(404).json({ erro: "Rota não encontrada" });
+  res.status(404).json({ erro: 'Rota não encontrada' });
 });
 
-// ================== INICIAR SERVIDOR ==================
-// Iniciar servidor com informações de debug
+// Start server
 app.listen(SERVER_PORT, '0.0.0.0', () => {
-  console.log("\n" + "=".repeat(70));
-  console.log("✓ Servidor GoLift iniciado com sucesso!");
-  console.log("=".repeat(70));
+  console.log('\n' + '='.repeat(70));
+  console.log('✓ Servidor GoLift iniciado com sucesso!');
+  console.log('='.repeat(70));
   console.log(`📍 IP Local do Servidor: ${SERVER_IP}`);
   console.log(`🔌 Porta: ${SERVER_PORT}`);
   console.log(`🌐 URL da API: http://${SERVER_IP}:${SERVER_PORT}`);
   console.log(`🔗 Localhost: http://localhost:${SERVER_PORT}`);
-  console.log("");
-  console.log("🤖 AUTO-CONFIGURAÇÃO DO CLIENTE:");
-  console.log(`   📌 Rota: GET /api/server-info`);
-  console.log(`   ℹ️  Retorna o IP correto e URL da API automaticamente`);
+  console.log('');
+  console.log('🤖 AUTO-CONFIGURAÇÃO DO CLIENTE:');
+  console.log('   📌 Rota: GET /api/server-info');
+  console.log('   ℹ️  Retorna o IP correto e URL da API automaticamente');
   console.log(`   🔗 Teste: http://${SERVER_IP}:${SERVER_PORT}/api/server-info`);
-  console.log("=".repeat(70) + "\n");
-  
-  // Fazer um request de teste após 1 segundo para confirmar que está funcionando
+  console.log('='.repeat(70) + '\n');
   setTimeout(() => {
     const testUrl = `http://localhost:${SERVER_PORT}/api/health`;
-    
     http.get(testUrl, (res) => {
       let data = '';
-      
-      res.on('data', (chunk) => {
-        data += chunk;
-      });
-      
-      res.on('end', () => {
-        try {
-          JSON.parse(data);
-        } catch (e) {
-          console.error(`⚠️ Erro ao parsear resposta: ${e.message}`);
-        }
-      });
-    }).on('error', (err) => {
-      console.error(`❌ Erro no request de teste: ${err.message}`);
-    });
+      res.on('data', (chunk) => { data += chunk; });
+      res.on('end', () => { try { JSON.parse(data); } catch (e) { console.error(`⚠️ Erro ao parsear resposta: ${e.message}`); } });
+    }).on('error', (err) => { console.error(`❌ Erro no request de teste: ${err.message}`); });
   }, 1000);
 });
