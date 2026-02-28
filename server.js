@@ -24,11 +24,6 @@ if (!process.env.JWT_SECRET || process.env.JWT_SECRET === 'golift_super_secret')
 // ...existing code...
 // Initialize express app and middleware
 
-const cors = require('cors');
-const helmet = require('helmet');
-const app = express();
-const http = require('http');
-const os = require('os');
 
 // ...existing code...
 
@@ -82,11 +77,7 @@ async function gorqGenerate({ prompt, type = "plan", diasPorSemana = 4 }) {
 // server.js — Clean, modular, professional
 require('dotenv').config();
 const express = require('express');
-const cors = require('cors');
-const helmet = require('helmet');
-const app = express();
-const http = require('http');
-const os = require('os');
+
 
 // --- Segurança: JWT_SECRET obrigatório ---
 if (!process.env.JWT_SECRET || process.env.JWT_SECRET === 'golift_super_secret') {
