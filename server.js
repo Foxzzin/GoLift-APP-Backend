@@ -16,7 +16,7 @@ const GORQ_BASE_URL = "https://api.gorq.ai/v1";
 // server.js — Clean, modular, professional
 require('dotenv').config();
 
-const helmet = require('helmet');
+
 const app = express();
 const http = require('http');
 const os = require('os');
