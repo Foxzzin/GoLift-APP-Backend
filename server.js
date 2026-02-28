@@ -1,12 +1,7 @@
+
 const recordesRoutes = require('./routes/recordes/recordes.routes');
 const sessoesRoutes = require('./routes/sessoes/sessoes.routes');
-// ...existing code...
-// Modular route imports (clean, professional)
-// ...existing code...
-// Modular route imports (clean, professional)
 const utilsRoutes = require('./routes/utils/utils.routes');
-// ...existing code...
-// ...existing code...
 const planoRoutes = require('./routes/plano/plano.routes');
 const aiRoutes = require('./routes/ai/ai.routes');
 const stripeRoutes = require('./routes/stripe/stripe.routes');
@@ -15,7 +10,25 @@ const treinoRoutes = require('./routes/treino/treino.routes');
 const authRoutes = require('./routes/auth/auth.routes');
 const userRoutes = require('./routes/user/user.routes');
 const adminRoutes = require('./routes/admin/admin.routes');
+const fetch = require("node-fetch");
+const GORQ_API_KEY = process.env.GORQ_API_KEY ;
+const GORQ_BASE_URL = "https://api.gorq.ai/v1";
+// server.js — Clean, modular, professional
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const helmet = require('helmet');
+const app = express();
+const http = require('http');
+const os = require('os');
 
+// --- Segurança: JWT_SECRET obrigatório ---
+if (!process.env.JWT_SECRET || process.env.JWT_SECRET === 'golift_super_secret') {
+  console.error('[SECURITY] JWT_SECRET não definido ou inseguro. Define JWT_SECRET nas variáveis de ambiente.');
+  process.exit(1);
+}
+
+// Register routes after app is initialized
 app.use('/api', utilsRoutes);
 app.use('/api/recordes', recordesRoutes);
 app.use('/api/sessoes', sessoesRoutes);
@@ -27,9 +40,6 @@ app.use('/api/treinos', treinoRoutes);
 app.use('/api', authRoutes);
 app.use('/api/user', userRoutes);
 app.use('/api/admin', adminRoutes);
-const fetch = require("node-fetch");
-const GORQ_API_KEY = process.env.GORQ_API_KEY ;
-const GORQ_BASE_URL = "https://api.gorq.ai/v1";
 
 async function gorqGenerate({ prompt, type = "plan", diasPorSemana = 4 }) {
   const endpoint = type === "plan" ? "/plan" : "/report";
