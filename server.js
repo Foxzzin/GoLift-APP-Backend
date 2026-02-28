@@ -2583,20 +2583,27 @@ app.get("/api/ai/plan/:userId", limiterAI, async (req, res) => {
 });
 
 // Gerar plano do mês
-app.post("/api/ai/plan/:userId/generate", limiterAI, async (req, res) => {
+
+app.post("/api/ai/plan/:userId/generate", limiterAI, authenticateJWT, async (req, res) => {
   const { userId } = req.params;
   const { diasPorSemana = 4 } = req.body;
 
+  // Buscar info do utilizador alvo
   const userRow = await new Promise((resolve) => {
-    db.query("SELECT plano, plano_ativo_ate, peso, altura, idade FROM users WHERE id_users = ?", [userId], (err, rows) => {
+    db.query("SELECT plano, plano_ativo_ate, peso, altura, idade, id_tipoUser FROM users WHERE id_users = ?", [userId], (err, rows) => {
       if (err) { console.error("[AI plan POST] DB err:", err.message); return resolve(null); }
       resolve(rows.length ? rows[0] : null);
     });
   });
   if (!userRow) return res.status(404).json({ erro: "Utilizador não encontrado" });
-  const agora = new Date();
-  const temPlano = userRow.plano === "pago" && (!userRow.plano_ativo_ate || new Date(userRow.plano_ativo_ate) > agora);
-  if (!temPlano) return res.status(403).json({ erro: "Plano GoLift Pro necessário", codigo: "PLANO_NECESSARIO" });
+
+  // Se quem faz o pedido for admin, ignora restrições de plano
+  // req.user.tipo vem do JWT (ver auth.middleware.js)
+  if (!(req.user && req.user.tipo === 1)) {
+    const agora = new Date();
+    const temPlano = userRow.plano === "pago" && (!userRow.plano_ativo_ate || new Date(userRow.plano_ativo_ate) > agora);
+    if (!temPlano) return res.status(403).json({ erro: "Plano GoLift Pro necessário", codigo: "PLANO_NECESSARIO" });
+  }
 
   const mesAtual = `${agora.getFullYear()}-${String(agora.getMonth() + 1).padStart(2, "0")}`;
   const mesNome = agora.toLocaleDateString("pt-PT", { month: "long", year: "numeric" });
@@ -2610,9 +2617,6 @@ app.post("/api/ai/plan/:userId/generate", limiterAI, async (req, res) => {
   if (existe) return res.status(400).json({ erro: "Já geraste o plano deste mês." });
 
   const prompt = `Cria um plano de treino semanal para ${mesNome} para um utilizador com:
-- Objetivo: ${userRow.objetivo || "ganho de massa muscular"}
-- Peso: ${userRow.peso || "?"}kg, Altura: ${userRow.altura || "?"}cm, Idade: ${userRow.idade || "?"}
-- Disponibilidade: ${diasPorSemana} dias por semana
 
 Responde APENAS com JSON válido (sem markdown, sem código blocks) com exatamente esta estrutura:
 {
