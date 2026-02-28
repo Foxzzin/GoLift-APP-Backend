@@ -17,12 +17,8 @@ if (!process.env.JWT_SECRET || process.env.JWT_SECRET === 'golift_super_secret')
   process.exit(1);
 }
 
-const express = require('express');
-const cors = require('cors');
-const helmet = require('helmet');
-const app = express();
-const http = require('http');
-const os = require('os');
+
+
 
 // Modular route imports (after app is initialized)
 const recordesRoutes = require('./routes/recordes/recordes.routes');
