@@ -17,7 +17,7 @@ const GORQ_BASE_URL = "https://api.gorq.ai/v1";
 require('dotenv').config();
 
 
-const app = express();
+
 const http = require('http');
 const os = require('os');
 
