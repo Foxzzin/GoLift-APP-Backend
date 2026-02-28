@@ -372,9 +372,7 @@ app.get("/api/admin/stats", authenticateJWT, (req, res) => {
 });
 
 
-// Rotas admin modulares
-const adminRoutes = require('./routes/admin.routes')
-app.use('/api/admin', adminRoutes)
+// ...existing code...
 
 // Get exercises (admin)
 app.get("/api/admin/exercicios", authenticateJWT, (req, res) => {
