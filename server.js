@@ -27,30 +27,7 @@ if (!process.env.JWT_SECRET || process.env.JWT_SECRET === 'golift_super_secret')
 
 // ...existing code...
 
-// --- Dependências principais ---
-const express = require('express');
-const cors = require('cors');
-const helmet = require('helmet');
-const http = require('http');
-const os = require('os');
 
-// --- Inicialização do app ---
-const app = express();
-
-// --- Helmet: headers de segurança ---
-app.use(helmet());
-
-// --- CORS restrito em produção ---
-const allowedOrigins = process.env.NODE_ENV === 'production'
-  ? [process.env.CLIENT_URL, 'https://app.golift.pt']
-  : undefined;
-app.use(cors({
-  origin: allowedOrigins || '*',
-  credentials: true
-}));
-
-app.use(express.json());
-app.set('trust proxy', 1);
 
 // --- Modular route imports ---
 const recordesRoutes = require('./routes/recordes/recordes.routes');
@@ -99,9 +76,7 @@ async function gorqGenerate({ prompt, type = "plan", diasPorSemana = 4 }) {
 }
 
 
-// server.js — Clean, modular, professional
-require('dotenv').config();
-const express = require('express');
+
 
 
 // --- Segurança: JWT_SECRET obrigatório ---
@@ -129,6 +104,17 @@ const SERVER_IP = (() => {
   return wifiIP || ethernetIP || anyIP || virtualIP || 'localhost';
 })();
 
+
+
+// --- Dependências principais ---
+const express = require('express');
+const cors = require('cors');
+const helmet = require('helmet');
+const http = require('http');
+const os = require('os');
+
+// --- Inicialização do app ---
+const app = express();
 
 // --- Helmet: headers de segurança ---
 app.use(helmet());
