@@ -27,7 +27,32 @@ if (!process.env.JWT_SECRET || process.env.JWT_SECRET === 'golift_super_secret')
 
 // ...existing code...
 
-// Modular route imports (after app is initialized)
+// --- Dependências principais ---
+const express = require('express');
+const cors = require('cors');
+const helmet = require('helmet');
+const http = require('http');
+const os = require('os');
+
+// --- Inicialização do app ---
+const app = express();
+
+// --- Helmet: headers de segurança ---
+app.use(helmet());
+
+// --- CORS restrito em produção ---
+const allowedOrigins = process.env.NODE_ENV === 'production'
+  ? [process.env.CLIENT_URL, 'https://app.golift.pt']
+  : undefined;
+app.use(cors({
+  origin: allowedOrigins || '*',
+  credentials: true
+}));
+
+app.use(express.json());
+app.set('trust proxy', 1);
+
+// --- Modular route imports ---
 const recordesRoutes = require('./routes/recordes/recordes.routes');
 const sessoesRoutes = require('./routes/sessoes/sessoes.routes');
 const utilsRoutes = require('./routes/utils/utils.routes');
@@ -40,7 +65,7 @@ const authRoutes = require('./routes/auth/auth.routes');
 const userRoutes = require('./routes/user/user.routes');
 const adminRoutes = require('./routes/admin/admin.routes');
 
-// Register routes after app is initialized
+// --- Registro das rotas ---
 app.use('/api', utilsRoutes);
 app.use('/api/recordes', recordesRoutes);
 app.use('/api/sessoes', sessoesRoutes);
