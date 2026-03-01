@@ -25,7 +25,7 @@ const register = async (req, res) => {
     if (err) return res.status(500).json({ erro: 'Erro interno.' })
     if (rows.length) return res.status(400).json({ erro: 'Email já registado.' })
     const hash = await bcrypt.hash(password, 10)
-    db.query('INSERT INTO users (userName, email, password, idade, peso, altura, id_tipoUser) VALUES (?, ?, ?, ?, ?, ?, 2)',
+    db.query('INSERT INTO users (userName, email, password, idade, peso, altura, id_tipoUser, created_at) VALUES (?, ?, ?, ?, ?, ?, 2, NOW())',
       [nome, email, hash, idade, peso, altura],
       (err, result) => {
         if (err) return res.status(500).json({ erro: 'Erro ao registar utilizador.' })
