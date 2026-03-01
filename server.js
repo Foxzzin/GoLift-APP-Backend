@@ -2165,14 +2165,29 @@ app.use((req, res) => {
 
 // Start server
 app.listen(SERVER_PORT, '0.0.0.0', () => {
+  const env       = process.env.NODE_ENV || 'development';
+  const dbHost    = process.env.DB_HOST  || 'localhost';
+  const dbName    = process.env.DB_NAME  || 'golift';
+  const startedAt = new Date().toISOString();
+
+  const check = (val) => (val ? '✅' : '❌ NÃO CONFIGURADO');
+
   console.log('\n' + '='.repeat(70));
-  console.log('✓ Servidor GoLift iniciado com sucesso!');
+  console.log('  GoLift Backend — Servidor iniciado');
   console.log('='.repeat(70));
-  console.log(`📍 IP Local do Servidor: ${SERVER_IP}`);
-  console.log(`🔌 Porta: ${SERVER_PORT}`);
-  console.log(`🌐 URL da API: http://${SERVER_IP}:${SERVER_PORT}`);
-  console.log(`🔗 Localhost: http://localhost:${SERVER_PORT}`);
+  console.log(`  Ambiente      : ${env.toUpperCase()}`);
+  console.log(`  Porta         : ${SERVER_PORT}`);
+  console.log(`  PID           : ${process.pid}`);
+  console.log(`  Node.js       : ${process.version}`);
+  console.log(`  Iniciado em   : ${startedAt}`);
+  console.log('─'.repeat(70));
+  console.log(`  Base de dados : ${dbHost} / ${dbName}`);
+  console.log(`  JWT Secret    : ${check(process.env.JWT_SECRET)}`);
+  console.log(`  SMTP (email)  : ${check(process.env.EMAIL_USER && process.env.EMAIL_APP_PASS)}`);
+  console.log(`  Stripe        : ${check(process.env.STRIPE_SECRET_KEY)}`);
+  console.log(`  AI (GORQ)     : ${check(process.env.GORQ_API_KEY)}`);
   console.log('='.repeat(70) + '\n');
+
   setTimeout(() => {
     const testUrl = `http://localhost:${SERVER_PORT}/api/health`;
     http.get(testUrl, (res) => {
