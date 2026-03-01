@@ -56,6 +56,10 @@ const updateProfileById = (req, res) => {
   const { userId } = req.params
   const { nome, idade, peso, altura } = req.body
 
+  if (parseInt(userId) !== req.user.id && req.user.tipo !== 1) {
+    return res.status(403).json({ erro: 'Acesso negado.' });
+  }
+
   if (!userId || isNaN(userId)) {
     return res.status(400).json({ success: false, erro: 'userId inválido.' })
   }

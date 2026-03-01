@@ -215,82 +215,6 @@ app.get("/api/health", (req, res) => {
   res.json({ sucesso: true, mensagem: "Servidor online" });
 });
 
-// Rota de Login
-app.post("/api/login", limiterLogin, (req, res) => {
-  const { email, password } = req.body;
-
-  if (!email || !password || typeof email !== "string" || typeof password !== "string") {
-    return res.status(400).json({ erro: "Email e password são obrigatórios." });
-  }
-
-  const sql = "SELECT * FROM users WHERE email = ? LIMIT 1";
-
-  db.query(sql, [email.trim()], async (err, rows) => {
-    if (err) {
-      console.error("❌ [LOGIN] Erro na BD:", err);
-      return res.status(500).json({ erro: "Erro na base de dados." });
-    }
-
-    if (rows.length === 0) {
-      return res.status(401).json({ erro: "Credenciais inválidas." });
-    }
-
-    const user = rows[0];
-
-    if (!user.password || typeof user.password !== "string") {
-      return res.status(401).json({ erro: "Credenciais inválidas." });
-    }
-
-    try {
-      const passwordCorreta = await bcrypt.compare(password, user.password);
-      
-      if (!passwordCorreta) {
-        return res.status(401).json({ erro: "Credenciais inválidas." });
-      }
-
-      const payload = {
-        id: user.id_users,
-        nome: user.userName,
-        email: user.email,
-        tipo: user.id_tipoUser
-      };
-      const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: "24h" });
-      res.json({
-        sucesso: true,
-        token,
-        user: payload
-      });
-    } catch (bcryptError) {
-      console.error("❌ [LOGIN] Erro ao comparar password:", bcryptError);
-      return res.status(500).json({ erro: "Erro ao validar credenciais." });
-    }
-  });
-});
-
-// Rota de registo
-app.post("/api/register", limiterLogin, async (req, res) => {
-  const { nome, email, password, idade, peso, altura } = req.body;
-
-  if (!nome || !email || !password || !idade || !peso || !altura) {
-    return res.status(400).json({ erro: "Todos os campos são obrigatórios." });
-  }
-
-  const checkSql = "SELECT * FROM users WHERE email = ? LIMIT 1";
-  db.query(checkSql, [email], async (err, rows) => {
-    if (err) return res.status(500).json({ erro: "Erro na base de dados." });
-    if (rows.length > 0) return res.status(409).json({ erro: "Email já registado." });
-
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    const insertSql = "INSERT INTO users (userName, email, password, idade, peso, altura, created_at) VALUES (?, ?, ?, ?, ?, ?, NOW())";
-    db.query(insertSql, [nome, email, hashedPassword, idade, peso, altura], (err, result) => {
-      if (err) return res.status(500).json({ erro: "Erro ao criar utilizador." });
-
-      res.json({ sucesso: true, mensagem: "Utilizador registado com sucesso!", id: result.insertId });
-    });
-  });
-});
-
 // Rota para obter o streak de treinos do utilizador
 app.get("/api/streak/:userId", authenticateJWT, (req, res) => {
   const { userId } = req.params;
@@ -465,10 +389,11 @@ app.get("/api/exercicios", authenticateJWT, (req, res) => {
 });
 
 app.post("/api/treino", authenticateJWT, (req, res) => {
-  const { userId, nome, exercicios, dataRealizacao } = req.body;
+  const userId = req.user.id;
+  const { nome, exercicios, dataRealizacao } = req.body;
 
-  if (!userId || !nome || !exercicios || !Array.isArray(exercicios) || exercicios.length === 0) {
-    return res.status(400).json({ erro: "userId, nome e lista de exercícios são obrigatórios." });
+  if (!nome || !exercicios || !Array.isArray(exercicios) || exercicios.length === 0) {
+    return res.status(400).json({ erro: "nome e lista de exercícios são obrigatórios." });
   }
 
   if (nome.trim().length === 0) {
@@ -1047,10 +972,11 @@ app.delete("/api/treino/:userId/:treinoId", authenticateJWT, (req, res) => {
 });
 
 app.post("/api/treino/sessao/guardar", authenticateJWT, (req, res) => {
-  const { userId, treinoId, duracao_segundos, series } = req.body;
+  const userId = req.user.id;
+  const { treinoId, duracao_segundos, series } = req.body;
 
-  if (!userId || !treinoId || !series || !Array.isArray(series) || series.length === 0) {
-    return res.status(400).json({ erro: "userId, treinoId e series são obrigatórios." });
+  if (!treinoId || !series || !Array.isArray(series) || series.length === 0) {
+    return res.status(400).json({ erro: "treinoId e series são obrigatórios." });
   }
 
   db.query(
@@ -1314,7 +1240,7 @@ app.get("/api/treino-admin", authenticateJWT, isAdmin, (req, res) => {
   });
 });
 
-app.get("/api/treinos-admin", authenticateJWT, (req, res) => {
+app.get("/api/treinos-admin", authenticateJWT, isAdmin, (req, res) => {
   const sql = `SELECT ta.id_treino_admin, ta.nome, ta.criado_em FROM treino_admin ta ORDER BY ta.criado_em DESC`;
   
   db.query(sql, (err, treinosRows) => {
@@ -1567,8 +1493,9 @@ app.get("/api/comunidades/user/:userId", authenticateJWT, (req, res) => {
 });
 
 app.post("/api/comunidades", authenticateJWT, (req, res) => {
-  const { nome, descricao, criador_id, pais, linguas, privada } = req.body;
-  if (!nome || !descricao || !criador_id) return res.status(400).json({ erro: "Nome, descrição e criador_id são obrigatórios" });
+  const criador_id = req.user.id;
+  const { nome, descricao, pais, linguas, privada } = req.body;
+  if (!nome || !descricao) return res.status(400).json({ erro: "Nome e descrição são obrigatórios" });
 
   db.query("INSERT INTO comunidades (nome, descricao, criador_id, pais, linguas, privada, verificada) VALUES (?, ?, ?, ?, ?, ?, 0)",
     [nome, descricao, criador_id, pais || null, linguas || null, privada ? 1 : 0], (err, result) => {
@@ -1582,8 +1509,7 @@ app.post("/api/comunidades", authenticateJWT, (req, res) => {
 
 app.post("/api/comunidades/:id/join", authenticateJWT, (req, res) => {
   const { id } = req.params;
-  const { userId } = req.body;
-  if (!userId) return res.status(400).json({ erro: "userId é obrigatório" });
+  const userId = req.user.id;
 
   db.query("INSERT INTO comunidade_membros (comunidade_id, user_id) VALUES (?, ?)", [id, userId], (err) => {
     if (err) {
@@ -1597,8 +1523,7 @@ app.post("/api/comunidades/:id/join", authenticateJWT, (req, res) => {
 
 app.post("/api/comunidades/:id/leave", authenticateJWT, (req, res) => {
   const { id } = req.params;
-  const { userId } = req.body;
-  if (!userId) return res.status(400).json({ erro: "userId é obrigatório" });
+  const userId = req.user.id;
 
   db.query("DELETE FROM comunidade_membros WHERE comunidade_id = ? AND user_id = ?", [id, userId], (err) => {
     if (err) { console.error("Erro ao sair da comunidade:", err); return res.status(500).json({ erro: "Erro ao sair da comunidade" }); }
@@ -1608,8 +1533,9 @@ app.post("/api/comunidades/:id/leave", authenticateJWT, (req, res) => {
 
 app.post("/api/comunidades/:id/mensagens", authenticateJWT, (req, res) => {
   const { id } = req.params;
-  const { userId, mensagem } = req.body;
-  if (!userId || !mensagem) return res.status(400).json({ erro: "userId e mensagem são obrigatórios" });
+  const userId = req.user.id;
+  const { mensagem } = req.body;
+  if (!mensagem) return res.status(400).json({ erro: "mensagem é obrigatória" });
 
   db.query("INSERT INTO comunidade_mensagens (comunidade_id, user_id, mensagem) VALUES (?, ?, ?)", [id, userId, mensagem], (err, result) => {
     if (err) { console.error("Erro ao enviar mensagem:", err); return res.status(500).json({ erro: "Erro ao enviar mensagem" }); }
@@ -1779,6 +1705,9 @@ app.post("/api/stripe/checkout-session", authenticateJWT, async (req, res) => {
 
 app.get("/api/plano/:userId", authenticateJWT, (req, res) => {
   const { userId } = req.params;
+  if (parseInt(userId) !== req.user.id && req.user.tipo !== 1) {
+    return res.status(403).json({ erro: 'Acesso negado.' });
+  }
   db.query("SELECT plano, plano_ativo_ate FROM users WHERE id_users = ?", [userId], (err, rows) => {
     if (err) return res.status(500).json({ erro: "Erro na base de dados" });
     if (!rows.length) return res.status(404).json({ erro: "Utilizador não encontrado" });
@@ -1799,6 +1728,9 @@ app.get("/api/plano/:userId", authenticateJWT, (req, res) => {
 
 app.get("/api/ai/report/:userId", authenticateJWT, limiterAI, async (req, res) => {
   const { userId } = req.params;
+  if (parseInt(userId) !== req.user.id && req.user.tipo !== 1) {
+    return res.status(403).json({ erro: 'Acesso negado.' });
+  }
 
   const userRow = await new Promise((resolve) => {
     db.query("SELECT plano, plano_ativo_ate FROM users WHERE id_users = ?", [userId], (err, rows) => {
@@ -1908,6 +1840,9 @@ Responde APENAS com JSON válido (sem markdown, sem código blocks) com exatamen
 
 app.get("/api/ai/plan/:userId", authenticateJWT, limiterAI, async (req, res) => {
   const { userId } = req.params;
+  if (parseInt(userId) !== req.user.id && req.user.tipo !== 1) {
+    return res.status(403).json({ erro: 'Acesso negado.' });
+  }
 
   const userRow = await new Promise((resolve) => {
     db.query("SELECT plano, plano_ativo_ate FROM users WHERE id_users = ?", [userId], (err, rows) => {
@@ -2030,6 +1965,9 @@ function detectarGrupoMuscular(nome) {
 
 app.post("/api/ai/plan/:userId/import-day", authenticateJWT, (req, res) => {
   const { userId } = req.params;
+  if (parseInt(userId) !== req.user.id && req.user.tipo !== 1) {
+    return res.status(403).json({ erro: 'Acesso negado.' });
+  }
   const { dia, foco, exercicios } = req.body;
 
   if (!dia || !exercicios || !Array.isArray(exercicios) || exercicios.length === 0) {
@@ -2096,8 +2034,7 @@ app.get("/api/daily-phrase", async (req, res) => {
 });
 
 app.post("/api/stripe/portal", authenticateJWT, async (req, res) => {
-  const { userId } = req.body;
-  if (!userId) return res.status(400).json({ erro: "userId obrigatório" });
+  const userId = req.user.id;
 
   db.query("SELECT stripe_customer_id FROM users WHERE id_users = ?", [userId], async (err, rows) => {
     if (err || rows.length === 0) return res.status(404).json({ erro: "Utilizador não encontrado" });

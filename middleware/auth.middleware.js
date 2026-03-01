@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken')
 
-const JWT_SECRET = process.env.JWT_SECRET || 'golift_super_secret'
+if (!process.env.JWT_SECRET) throw new Error('[SECURITY] JWT_SECRET obrigatório');
+const JWT_SECRET = process.env.JWT_SECRET;
 
 function authenticateJWT(req, res, next) {
   const authHeader = req.headers['authorization']
