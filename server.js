@@ -1081,6 +1081,7 @@ app.post("/api/treino/sessao/guardar", authenticateJWT, (req, res) => {
             if (err3) {
               console.warn("[API] POST /api/treino/sessao/guardar - Erro ao atualizar status:", err3);
             }
+            console.log(`[SESSAO] userId=${userId} treinoId=${treinoId} sessaoId=${sessaoId} duracao=${duracao_segundos || 0}s series=${series.length}`);
             res.json({ sucesso: true, mensagem: "Treino guardado com sucesso!", id_sessao: sessaoId });
           });
         }
