@@ -9,14 +9,19 @@ if (!process.env.JWT_SECRET || process.env.JWT_SECRET === 'golift_super_secret')
 }
 
 // --- Dependências principais ---
-const express = require('express');
-const cors    = require('cors');
-const helmet  = require('helmet');
-const http    = require('http');
-const os      = require('os');
-const jwt     = require('jsonwebtoken');
-const bcrypt  = require('bcrypt');
-const mysql   = require('mysql2');
+const express    = require('express');
+const cors       = require('cors');
+const helmet     = require('helmet');
+const http       = require('http');
+const os         = require('os');
+const jwt        = require('jsonwebtoken');
+const bcrypt     = require('bcrypt');
+const mysql      = require('mysql2');
+const crypto     = require('crypto');
+const nodemailer = require('nodemailer');
+
+// --- isAdmin middleware (inline routes) ---
+const { isAdmin } = require('./middleware/permissions.middleware');
 
 // --- Rate limiter ---
 const rateLimit = require('express-rate-limit');
@@ -70,8 +75,27 @@ const db = mysql.createPool({
   connectionLimit: 10,
 });
 
-// --- Reset codes para recuperação de password ---
+// --- Reset codes para recuperação de password (único Map consolidado) ---
 const resetCodes = new Map();
+
+// --- Nodemailer transporter (usa EMAIL_USER + EMAIL_APP_PASS do .env) ---
+const mailTransporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_APP_PASS,
+  },
+});
+
+async function sendRecoveryEmail(email, code) {
+  await mailTransporter.sendMail({
+    from:    `"GoLift" <${process.env.EMAIL_USER}>`,
+    to:      email,
+    subject: 'GoLift — Código de recuperação de password',
+    text:    `O teu código de recuperação é: ${code}\nExpira em 15 minutos.`,
+    html:    `<p>O teu código de recuperação é: <strong>${code}</strong></p><p>Expira em 15 minutos.</p>`,
+  });
+}
 
 // --- SERVER_PORT / SERVER_IP ---
 const SERVER_PORT = process.env.PORT || 5000;
@@ -350,7 +374,7 @@ app.get("/api/streak/:userId", authenticateJWT, (req, res) => {
 
 // ---------- Admin API routes ----------
 
-app.get("/api/admin/stats", authenticateJWT, (req, res) => {
+app.get("/api/admin/stats", authenticateJWT, isAdmin, (req, res) => {
   const stats = {};
 
   db.query("SELECT COUNT(*) as totalUsers FROM users", (err, rows) => {
@@ -376,7 +400,7 @@ app.get("/api/admin/stats", authenticateJWT, (req, res) => {
   });
 });
 
-app.get("/api/admin/exercicios", authenticateJWT, (req, res) => {
+app.get("/api/admin/exercicios", authenticateJWT, isAdmin, (req, res) => {
   const sql = "SELECT id_exercicio as id, nome, descricao, video, recorde_pessoal as recorde_pessoal, grupo_tipo, sub_tipo FROM exercicios ORDER BY nome ASC";
   db.query(sql, (err, rows) => {
     if (err) {
@@ -387,7 +411,7 @@ app.get("/api/admin/exercicios", authenticateJWT, (req, res) => {
   });
 });
 
-app.post("/api/admin/exercicios", authenticateJWT, (req, res) => {
+app.post("/api/admin/exercicios", authenticateJWT, isAdmin, (req, res) => {
   const { nome, descricao, video, recorde_pessoal, grupo_tipo, sub_tipo } = req.body;
   if (!nome) return res.status(400).json({ erro: "Nome do exercício é obrigatório." });
 
@@ -405,7 +429,7 @@ app.post("/api/admin/exercicios", authenticateJWT, (req, res) => {
   });
 });
 
-app.delete("/api/admin/exercicios/:nome", authenticateJWT, (req, res) => {
+app.delete("/api/admin/exercicios/:nome", authenticateJWT, isAdmin, (req, res) => {
   const { nome } = req.params;
   db.query("DELETE FROM exercicios WHERE nome = ?", [nome], (err, result) => {
     if (err) {
@@ -1416,21 +1440,26 @@ app.delete("/api/treino-admin/:id", authenticateJWT, (req, res) => {
 
 // ============ RECUPERAÇÃO DE SENHA ============
 
-const recoveryCodes = new Map();
-
-app.post("/api/recuperar-senha", (req, res) => {
+app.post("/api/recuperar-senha", async (req, res) => {
   const { email } = req.body;
 
   if (!email) return res.status(400).json({ erro: "Email é obrigatório." });
 
-  db.query("SELECT id_users, userName FROM users WHERE email = ?", [email], (err, rows) => {
+  db.query("SELECT id_users, userName FROM users WHERE email = ?", [email], async (err, rows) => {
     if (err) { console.error("Erro ao verificar email:", err); return res.status(500).json({ erro: "Erro na base de dados." }); }
     if (rows.length === 0) return res.status(404).json({ erro: "Email não encontrado." });
 
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
-    recoveryCodes.set(email, { code, expiresAt: Date.now() + 15 * 60 * 1000, userId: rows[0].id_users });
+    const code = crypto.randomInt(100000, 999999).toString();
+    resetCodes.set(email, { code, expiresAt: Date.now() + 15 * 60 * 1000, userId: rows[0].id_users });
 
-    res.json({ sucesso: true, mensagem: "Código de recuperação enviado para o email.", codigo_teste: code });
+    try {
+      await sendRecoveryEmail(email, code);
+    } catch (mailErr) {
+      console.error('[recuperar-senha] Erro ao enviar email:', mailErr.message);
+      return res.status(500).json({ erro: 'Erro ao enviar email de recuperação.' });
+    }
+
+    res.json({ sucesso: true, mensagem: "Código de recuperação enviado para o email." });
   });
 });
 
@@ -1438,9 +1467,9 @@ app.post("/api/verificar-codigo", (req, res) => {
   const { email, codigo } = req.body;
   if (!email || !codigo) return res.status(400).json({ erro: "Email e código são obrigatórios." });
 
-  const recovery = recoveryCodes.get(email);
+  const recovery = resetCodes.get(email);
   if (!recovery) return res.status(400).json({ erro: "Nenhum código de recuperação encontrado. Solicite um novo." });
-  if (Date.now() > recovery.expiresAt) { recoveryCodes.delete(email); return res.status(400).json({ erro: "Código expirado. Solicite um novo." }); }
+  if (Date.now() > recovery.expiresAt) { resetCodes.delete(email); return res.status(400).json({ erro: "Código expirado. Solicite um novo." }); }
   if (recovery.code !== codigo) return res.status(400).json({ erro: "Código inválido." });
 
   res.json({ sucesso: true, mensagem: "Código válido." });
@@ -1451,16 +1480,16 @@ app.post("/api/redefinir-senha", async (req, res) => {
   if (!email || !codigo || !novaSenha) return res.status(400).json({ erro: "Todos os campos são obrigatórios." });
   if (novaSenha.length < 6) return res.status(400).json({ erro: "A senha deve ter pelo menos 6 caracteres." });
 
-  const recovery = recoveryCodes.get(email);
+  const recovery = resetCodes.get(email);
   if (!recovery) return res.status(400).json({ erro: "Nenhum código de recuperação encontrado." });
-  if (Date.now() > recovery.expiresAt) { recoveryCodes.delete(email); return res.status(400).json({ erro: "Código expirado. Solicite um novo." }); }
+  if (Date.now() > recovery.expiresAt) { resetCodes.delete(email); return res.status(400).json({ erro: "Código expirado. Solicite um novo." }); }
   if (recovery.code !== codigo) return res.status(400).json({ erro: "Código inválido." });
 
   try {
     const hashedPassword = await bcrypt.hash(novaSenha, 10);
     db.query("UPDATE users SET password = ? WHERE email = ?", [hashedPassword, email], (err) => {
       if (err) { console.error("Erro ao atualizar senha:", err); return res.status(500).json({ erro: "Erro ao atualizar senha." }); }
-      recoveryCodes.delete(email);
+      resetCodes.delete(email);
       res.json({ sucesso: true, mensagem: "Senha alterada com sucesso!" });
     });
   } catch (error) {
@@ -1603,7 +1632,7 @@ app.get("/api/comunidades/:id/membros", authenticateJWT, (req, res) => {
   });
 });
 
-app.get("/api/admin/comunidades", authenticateJWT, (req, res) => {
+app.get("/api/admin/comunidades", authenticateJWT, isAdmin, (req, res) => {
   const sql = `
     SELECT c.*, u.userName as criador_nome,
            (SELECT COUNT(*) FROM comunidade_membros WHERE comunidade_id = c.id) as membros
@@ -1617,7 +1646,7 @@ app.get("/api/admin/comunidades", authenticateJWT, (req, res) => {
   });
 });
 
-app.get("/api/admin/comunidades/pendentes", authenticateJWT, (req, res) => {
+app.get("/api/admin/comunidades/pendentes", authenticateJWT, isAdmin, (req, res) => {
   const sql = `
     SELECT c.*, u.userName as criador_nome,
            (SELECT COUNT(*) FROM comunidade_membros WHERE comunidade_id = c.id) as membros
@@ -1632,7 +1661,7 @@ app.get("/api/admin/comunidades/pendentes", authenticateJWT, (req, res) => {
   });
 });
 
-app.post("/api/admin/comunidades/:id/verificar", authenticateJWT, (req, res) => {
+app.post("/api/admin/comunidades/:id/verificar", authenticateJWT, isAdmin, (req, res) => {
   const { id } = req.params;
   db.query("UPDATE comunidades SET verificada = 1 WHERE id = ?", [id], (err) => {
     if (err) { console.error("Erro ao verificar comunidade:", err); return res.status(500).json({ erro: "Erro ao verificar comunidade" }); }
@@ -1640,7 +1669,7 @@ app.post("/api/admin/comunidades/:id/verificar", authenticateJWT, (req, res) => 
   });
 });
 
-app.post("/api/admin/comunidades/:id/rejeitar", authenticateJWT, (req, res) => {
+app.post("/api/admin/comunidades/:id/rejeitar", authenticateJWT, isAdmin, (req, res) => {
   const { id } = req.params;
   db.query("DELETE FROM comunidades WHERE id = ?", [id], (err) => {
     if (err) { console.error("Erro ao rejeitar comunidade:", err); return res.status(500).json({ erro: "Erro ao rejeitar comunidade" }); }
@@ -1648,7 +1677,7 @@ app.post("/api/admin/comunidades/:id/rejeitar", authenticateJWT, (req, res) => {
   });
 });
 
-app.post("/api/admin/comunidades/:id/toggle", (req, res) => {
+app.post("/api/admin/comunidades/:id/toggle", authenticateJWT, isAdmin, (req, res) => {
   const { id } = req.params;
   const { verificada } = req.body;
   db.query("UPDATE comunidades SET verificada = ? WHERE id = ?", [verificada ? 1 : 0, id], (err) => {
@@ -1659,7 +1688,7 @@ app.post("/api/admin/comunidades/:id/toggle", (req, res) => {
 
 // ================== RECUPERAÇÃO DE PASSWORD (novo fluxo) ==================
 
-app.post("/api/auth/forgot-password", (req, res) => {
+app.post("/api/auth/forgot-password", async (req, res) => {
   const { email } = req.body;
   if (!email) return res.status(400).json({ erro: "Email obrigatório" });
 
@@ -1667,12 +1696,18 @@ app.post("/api/auth/forgot-password", (req, res) => {
     if (err) return res.status(500).json({ erro: "Erro na base de dados" });
     if (results.length === 0) return res.json({ sucesso: true });
 
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const code = crypto.randomInt(100000, 999999).toString();
     const expiry = Date.now() + 15 * 60 * 1000;
     resetCodes.set(email.toLowerCase(), { code, expiry });
 
-    console.log(`[Password Reset] Código para ${email}: ${code}`);
-    res.json({ sucesso: true, codigo_teste: code });
+    try {
+      await sendRecoveryEmail(email, code);
+    } catch (mailErr) {
+      console.error('[forgot-password] Erro ao enviar email:', mailErr.message);
+      return res.status(500).json({ erro: 'Erro ao enviar email de recuperação.' });
+    }
+
+    res.json({ sucesso: true });
   });
 });
 
