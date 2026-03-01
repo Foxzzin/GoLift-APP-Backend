@@ -145,7 +145,7 @@ async function geminiGenerate(prompt) {
 
 // --- Modular route imports ---
 const recordesRoutes  = require('./routes/recordes/recordes.routes');
-const sessoesRoutes   = require('./routes/sessoes/sessoes.routes');
+// const sessoesRoutes   = require('./routes/sessoes/sessoes.routes'); // rota inline em /api/sessoes/:userId sobrepõe-se
 const utilsRoutes     = require('./routes/utils/utils.routes');
 const planoRoutes     = require('./routes/plano/plano.routes');
 const aiRoutes        = require('./routes/ai/ai.routes');
@@ -159,7 +159,7 @@ const adminRoutes     = require('./routes/admin/admin.routes');
 // --- Registo das rotas ---
 app.use('/api',            utilsRoutes);
 app.use('/api/recordes',   recordesRoutes);
-app.use('/api/sessoes',    sessoesRoutes);
+// app.use('/api/sessoes',    sessoesRoutes); // rota inline em server.js linha ~532 é a correcta
 app.use('/api/plano',      planoRoutes);
 app.use('/api/ai',         aiRoutes);
 app.use('/api/stripe',     stripeRoutes);
