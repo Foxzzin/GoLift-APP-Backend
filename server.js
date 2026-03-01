@@ -1523,7 +1523,7 @@ app.get('/api/treino-user/:treino_id/exercicios', authenticateJWT, (req, res) =>
   });
 });
 
-app.delete('/api/treino-user/:treino_id/exercicios/:exercicio_id', (req, res) => {
+app.delete('/api/treino-user/:treino_id/exercicios/:exercicio_id', authenticateJWT, (req, res) => {
   const { treino_id, exercicio_id } = req.params;
 
   db.query('DELETE FROM treino_exercicio WHERE id_treino = ? AND id_exercicio = ?', [treino_id, exercicio_id], (err) => {
@@ -1750,9 +1750,8 @@ app.post("/api/auth/reset-password", async (req, res) => {
 
 // ================== STRIPE CHECKOUT ==================
 
-app.post("/api/stripe/checkout-session", async (req, res) => {
-  const { userId } = req.body;
-  if (!userId) return res.status(400).json({ erro: "userId obrigatório" });
+app.post("/api/stripe/checkout-session", authenticateJWT, async (req, res) => {
+  const userId = req.user.id;
 
   const baseUrl = process.env.SERVER_URL ||
     (process.env.APP_URL && process.env.APP_URL.startsWith("https://")
@@ -1778,7 +1777,7 @@ app.post("/api/stripe/checkout-session", async (req, res) => {
   }
 });
 
-app.get("/api/plano/:userId", (req, res) => {
+app.get("/api/plano/:userId", authenticateJWT, (req, res) => {
   const { userId } = req.params;
   db.query("SELECT plano, plano_ativo_ate FROM users WHERE id_users = ?", [userId], (err, rows) => {
     if (err) return res.status(500).json({ erro: "Erro na base de dados" });
@@ -1798,7 +1797,7 @@ app.get("/api/plano/:userId", (req, res) => {
 
 // ================== AI — RELATÓRIO SEMANAL ==================
 
-app.get("/api/ai/report/:userId", limiterAI, async (req, res) => {
+app.get("/api/ai/report/:userId", authenticateJWT, limiterAI, async (req, res) => {
   const { userId } = req.params;
 
   const userRow = await new Promise((resolve) => {
@@ -1907,7 +1906,7 @@ Responde APENAS com JSON válido (sem markdown, sem código blocks) com exatamen
 
 // ================== AI — PLANO MENSAL ==================
 
-app.get("/api/ai/plan/:userId", limiterAI, async (req, res) => {
+app.get("/api/ai/plan/:userId", authenticateJWT, limiterAI, async (req, res) => {
   const { userId } = req.params;
 
   const userRow = await new Promise((resolve) => {
@@ -2029,7 +2028,7 @@ function detectarGrupoMuscular(nome) {
   return { grupo_tipo: "Outros", sub_tipo: "Geral" };
 }
 
-app.post("/api/ai/plan/:userId/import-day", (req, res) => {
+app.post("/api/ai/plan/:userId/import-day", authenticateJWT, (req, res) => {
   const { userId } = req.params;
   const { dia, foco, exercicios } = req.body;
 
@@ -2096,7 +2095,7 @@ app.get("/api/daily-phrase", async (req, res) => {
   });
 });
 
-app.post("/api/stripe/portal", async (req, res) => {
+app.post("/api/stripe/portal", authenticateJWT, async (req, res) => {
   const { userId } = req.body;
   if (!userId) return res.status(400).json({ erro: "userId obrigatório" });
 
