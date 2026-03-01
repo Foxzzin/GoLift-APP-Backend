@@ -31,6 +31,15 @@ const limiterAI = rateLimit({
   message: { erro: 'Demasiados pedidos. Tenta novamente mais tarde.' }
 });
 
+const limiterLogin = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: { erro: 'Demasiadas tentativas. Aguarda 15 minutos.' },
+  keyGenerator: (req) => (req.body && req.body.email) ? req.body.email.toLowerCase() : req.ip,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 // --- Constantes GORQ ---
 const GORQ_API_KEY  = process.env.GORQ_API_KEY;
 const GORQ_BASE_URL = "https://api.gorq.ai/v1";
@@ -69,7 +78,7 @@ const authenticateJWT = (req, res, next) => {
 const db = mysql.createPool({
   host:     process.env.DB_HOST     || 'localhost',
   user:     process.env.DB_USER     || 'root',
-  password: process.env.DB_PASSWORD || '',
+  password: process.env.DB_PASS     || '',
   database: process.env.DB_NAME     || 'golift',
   waitForConnections: true,
   connectionLimit: 10,
@@ -158,7 +167,6 @@ app.use('/api/comunidades',comunidadeRoutes);
 app.use('/api/treinos',    treinoRoutes);
 app.use('/api',            authRoutes);
 app.use('/api',            userRoutes);  // expõe /api/profile/:userId
-app.use('/api/user',       userRoutes);
 app.use('/api/admin',      adminRoutes);
 
 // ... resto das rotas inline a seguir ...
@@ -208,7 +216,7 @@ app.get("/api/health", (req, res) => {
 });
 
 // Rota de Login
-app.post("/api/login", (req, res) => {
+app.post("/api/login", limiterLogin, (req, res) => {
   const { email, password } = req.body;
 
   if (!email || !password || typeof email !== "string" || typeof password !== "string") {
@@ -260,7 +268,7 @@ app.post("/api/login", (req, res) => {
 });
 
 // Rota de registo
-app.post("/api/register", async (req, res) => {
+app.post("/api/register", limiterLogin, async (req, res) => {
   const { nome, email, password, idade, peso, altura } = req.body;
 
   if (!nome || !email || !password || !idade || !peso || !altura) {
@@ -280,41 +288,6 @@ app.post("/api/register", async (req, res) => {
 
       res.json({ sucesso: true, mensagem: "Utilizador registado com sucesso!", id: result.insertId });
     });
-  });
-});
-
-// Rota para obter dados do perfil do utilizador
-app.get("/api/profile/:userId", authenticateJWT, (req, res) => {
-  const { userId } = req.params;
-  if (parseInt(userId) !== req.user.id && req.user.tipo !== 1) {
-    return res.status(403).json({ erro: "Acesso negado." });
-  }
-
-  const sql = `
-    SELECT 
-      u.id_users as id,
-      u.userName as name,
-      u.email,
-      u.idade as age,
-      u.peso as weight,
-      u.altura as height,
-      u.created_at as createdAt
-    FROM users u
-    WHERE u.id_users = ? 
-    LIMIT 1
-  `;
-
-  db.query(sql, [userId], (err, rows) => {
-    if (err) {
-      console.error("[API] /api/profile SQL error:", err);
-      return res.status(500).json({ erro: "Erro ao obter perfil." });
-    }
-
-    if (!rows || rows.length === 0) {
-      return res.status(404).json({ erro: "Utilizador não encontrado." });
-    }
-
-    return res.json({ sucesso: true, user: rows[0] });
   });
 });
 
@@ -343,61 +316,92 @@ app.get("/api/streak/:userId", authenticateJWT, (req, res) => {
       return res.json({ sucesso: true, streak: 0, maxStreak: 0 });
     }
 
+    // --- currentStreak: dias consecutivos a partir de hoje ---
     let currentStreak = 0;
-    let maxStreak = 0;
-    let today = new Date();
+    const today = new Date();
     today.setHours(0, 0, 0, 0);
 
-    for (let i = 0; i < rows.length; i++) {
-      const workoutDate = new Date(rows[i].data_treino);
-      workoutDate.setHours(0, 0, 0, 0);
+    if (rows.length > 0) {
+      const firstDate = new Date(rows[0].data_treino);
+      firstDate.setHours(0, 0, 0, 0);
+      const diffToday = Math.floor((today - firstDate) / (1000 * 60 * 60 * 24));
 
-      const expectedDate = new Date(today);
-      expectedDate.setDate(expectedDate.getDate() - i);
-
-      if (workoutDate.getTime() === expectedDate.getTime()) {
-        currentStreak++;
-      } else {
-        break;
+      if (diffToday <= 1) { // treinou hoje ou ontem — streak activo
+        currentStreak = 1;
+        for (let i = 1; i < rows.length; i++) {
+          const prev = new Date(rows[i - 1].data_treino);
+          const curr = new Date(rows[i].data_treino);
+          prev.setHours(0, 0, 0, 0);
+          curr.setHours(0, 0, 0, 0);
+          const diff = Math.floor((prev - curr) / (1000 * 60 * 60 * 24));
+          if (diff === 1) { currentStreak++; } else { break; }
+        }
       }
     }
 
-    maxStreak = currentStreak;
+    // --- maxStreak: máximo histórico sobre todas as datas ---
+    let maxStreak = 0;
+    let tempStreak = rows.length > 0 ? 1 : 0;
+    for (let i = 1; i < rows.length; i++) {
+      const prev = new Date(rows[i - 1].data_treino);
+      const curr = new Date(rows[i].data_treino);
+      prev.setHours(0, 0, 0, 0);
+      curr.setHours(0, 0, 0, 0);
+      const diff = Math.floor((prev - curr) / (1000 * 60 * 60 * 24));
+      if (diff === 1) {
+        tempStreak++;
+      } else {
+        if (tempStreak > maxStreak) maxStreak = tempStreak;
+        tempStreak = 1;
+      }
+    }
+    if (tempStreak > maxStreak) maxStreak = tempStreak;
 
-    res.json({ 
-      sucesso: true, 
+    res.json({
+      sucesso: true,
       streak: currentStreak,
-      maxStreak: maxStreak
+      maxStreak
     });
   });
 });
 
 // ---------- Admin API routes ----------
 
-app.get("/api/admin/stats", authenticateJWT, isAdmin, (req, res) => {
-  const stats = {};
+app.get("/api/admin/stats", authenticateJWT, isAdmin, async (req, res) => {
+  try {
+    const pool = db.promise();
 
-  db.query("SELECT COUNT(*) as totalUsers FROM users", (err, rows) => {
-    if (err) return res.status(500).json({ erro: "Erro ao obter total de utilizadores." });
-    stats.totalUsers = rows[0].totalUsers || 0;
+    const [
+      [totalUsersRows],
+      [totalTreinosRows],
+      [totalExercisesRows],
+      [totalAdminsRows],
+      [proUsersRows],
+      [newUsersRows],
+      [sessionsRows],
+    ] = await Promise.all([
+      pool.query('SELECT COUNT(*) AS total FROM users'),
+      pool.query('SELECT COUNT(*) AS total FROM treino'),
+      pool.query('SELECT COUNT(*) AS total FROM exercicios'),
+      pool.query("SELECT COUNT(*) AS total FROM users WHERE id_tipoUser = 1"),
+      pool.query("SELECT COUNT(*) AS total FROM users WHERE plano = 'pago' AND (plano_ativo_ate IS NULL OR plano_ativo_ate > NOW())"),
+      pool.query('SELECT COUNT(*) AS total FROM users WHERE created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)'),
+      pool.query('SELECT COUNT(*) AS total FROM treino_sessao WHERE data_fim IS NOT NULL AND data_fim >= DATE_SUB(NOW(), INTERVAL 7 DAY)'),
+    ]);
 
-    db.query("SELECT COUNT(*) as totalTreinos FROM treino", (err2, rows2) => {
-      if (err2) return res.status(500).json({ erro: "Erro ao obter total de treinos." });
-      stats.totalTreinos = rows2[0].totalTreinos || 0;
-
-      db.query("SELECT COUNT(*) as totalExercises FROM exercicios", (err3, rows3) => {
-        if (err3) return res.status(500).json({ erro: "Erro ao obter total de exercícios." });
-        stats.totalExercises = rows3[0].totalExercises || 0;
-
-        db.query("SELECT COUNT(*) as totalAdmins FROM users WHERE id_tipoUser = 1", (err4, rows4) => {
-          if (err4) return res.status(500).json({ erro: "Erro ao obter total de admins." });
-          stats.totalAdmins = rows4[0].totalAdmins || 0;
-
-          return res.json(stats);
-        });
-      });
+    res.json({
+      totalUsers:       totalUsersRows[0].total,
+      totalTreinos:     totalTreinosRows[0].total,
+      totalExercises:   totalExercisesRows[0].total,
+      totalAdmins:      totalAdminsRows[0].total,
+      proUsers:         proUsersRows[0].total,
+      newUsersThisWeek: newUsersRows[0].total,
+      sessionsThisWeek: sessionsRows[0].total,
     });
-  });
+  } catch (err) {
+    console.error('[admin.stats]', err);
+    res.status(500).json({ erro: 'Erro ao obter estatísticas' });
+  }
 });
 
 app.get("/api/admin/exercicios", authenticateJWT, isAdmin, (req, res) => {
@@ -704,8 +708,6 @@ app.get("/api/treino/:userId", authenticateJWT, (req, res) => {
     return res.status(403).json({ erro: "Acesso negado." });
   }
 
-  console.log(`👤 Carregando treinos do utilizador ID: ${userId}`);
-
   const sqlWithNome = `
     SELECT 
       t.id_treino,
@@ -781,7 +783,7 @@ app.get("/api/treino/:userId", authenticateJWT, (req, res) => {
 });
 
 // IMPORTANTE: Esta rota DEVE estar ANTES de /api/treino/:userId/:treinoId
-app.get("/api/treino/sessao/:sessaoId", (req, res) => {
+app.get("/api/treino/sessao/:sessaoId", authenticateJWT, (req, res) => {
   const { sessaoId } = req.params;
 
   const query1 = "SELECT * FROM treino_sessao WHERE id_sessao = ?";
@@ -1271,7 +1273,7 @@ app.get("/api/treino/detalhes/:treinoId/:dataIso", authenticateJWT, (req, res) =
 
 // ============ ROTAS DE TREINOS PARA ADMINS ============
 
-app.get("/api/treino-admin", authenticateJWT, (req, res) => {
+app.get("/api/treino-admin", authenticateJWT, isAdmin, (req, res) => {
   const sql = `SELECT ta.id_treino_admin, ta.nome, ta.criado_em FROM treino_admin ta ORDER BY ta.criado_em DESC`;
   
   db.query(sql, (err, treinosRows) => {
@@ -1368,7 +1370,7 @@ app.get("/api/treino-admin/:id", authenticateJWT, (req, res) => {
   });
 });
 
-app.post("/api/treino-admin", authenticateJWT, (req, res) => {
+app.post("/api/treino-admin", authenticateJWT, isAdmin, (req, res) => {
   const { nome, exercicios } = req.body;
 
   if (!nome || !Array.isArray(exercicios) || exercicios.length === 0) {
@@ -1395,7 +1397,7 @@ app.post("/api/treino-admin", authenticateJWT, (req, res) => {
   });
 });
 
-app.put("/api/treino-admin/:id", authenticateJWT, (req, res) => {
+app.put("/api/treino-admin/:id", authenticateJWT, isAdmin, (req, res) => {
   const { id } = req.params;
   const { nome, exercicios } = req.body;
 
@@ -1429,7 +1431,7 @@ app.put("/api/treino-admin/:id", authenticateJWT, (req, res) => {
   });
 });
 
-app.delete("/api/treino-admin/:id", authenticateJWT, (req, res) => {
+app.delete("/api/treino-admin/:id", authenticateJWT, isAdmin, (req, res) => {
   const { id } = req.params;
 
   db.query("DELETE FROM treino_admin WHERE id_treino_admin = ?", [id], (err) => {
@@ -1498,7 +1500,7 @@ app.post("/api/redefinir-senha", async (req, res) => {
   }
 });
 
-app.get('/api/treino-user/:treino_id/exercicios', (req, res) => {
+app.get('/api/treino-user/:treino_id/exercicios', authenticateJWT, (req, res) => {
   const { treino_id } = req.params;
 
   console.log(`📋 Carregando exercícios do treino ID: ${treino_id}`);
@@ -1738,7 +1740,6 @@ app.post("/api/auth/reset-password", async (req, res) => {
     db.query("UPDATE users SET password = ? WHERE email = ?", [hash, email], (err) => {
       if (err) return res.status(500).json({ erro: "Erro ao atualizar password" });
       resetCodes.delete(email.toLowerCase());
-      console.log(`[Password Reset] Password atualizada para ${email}`);
       res.json({ sucesso: true });
     });
   } catch (err) {
@@ -2147,6 +2148,14 @@ app.get("/payment-return", (req, res) => {
   </div>
 </body>
 </html>`);
+});
+
+// Global error handler
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, next) => {
+  console.error('[ERROR]', err.message || err);
+  const status = err.status || err.statusCode || 500;
+  res.status(status).json({ erro: err.message || 'Erro interno do servidor.' });
 });
 
 // 404 Handler
