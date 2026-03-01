@@ -133,6 +133,7 @@ app.use('/api/stripe',     stripeRoutes);
 app.use('/api/comunidades',comunidadeRoutes);
 app.use('/api/treinos',    treinoRoutes);
 app.use('/api',            authRoutes);
+app.use('/api',            userRoutes);  // expõe /api/profile/:userId
 app.use('/api/user',       userRoutes);
 app.use('/api/admin',      adminRoutes);
 

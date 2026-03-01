@@ -5,12 +5,10 @@ const adminController = require('../../controllers/admin/admin.controller')
 const { isAdmin } = require('../../middleware/permissions.middleware')
 const { userUpdateValidation } = require('../../utils/validators')
 
-// Exemplo: obter utilizadores (apenas admin)
+// Gestão de utilizadores (apenas admin)
 router.get('/users', authenticateJWT, isAdmin, adminController.getUsers)
-router.put('/users/:id', authenticateJWT, isAdmin, adminController.updateUser)
-router.delete('/users/:id', authenticateJWT, isAdmin, adminController.deleteUser)
-
 router.put('/users/:id', authenticateJWT, isAdmin, userUpdateValidation, adminController.updateUser)
+router.delete('/users/:id', authenticateJWT, isAdmin, adminController.deleteUser)
 // ...adicionar outras rotas admin
 
 module.exports = router
