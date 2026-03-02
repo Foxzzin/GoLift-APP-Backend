@@ -31,9 +31,10 @@ const limiterAI = rateLimit({
   message: { erro: 'Demasiados pedidos. Tenta novamente mais tarde.' }
 });
 
-// --- Constantes GORQ ---
+// --- Constantes GROQ ---
 const GORQ_API_KEY  = process.env.GORQ_API_KEY;
-const GORQ_BASE_URL = "https://api.gorq.ai/v1";
+const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
+const GROQ_MODEL   = "llama-3.3-70b-versatile";
 
 // --- Inicialização do app ---
 const app = express();
@@ -117,16 +118,47 @@ const SERVER_IP = (() => {
   return wifiIP || ethernetIP || anyIP || virtualIP || 'localhost';
 })();
 
-// --- gorqGenerate ---
+// --- gorqGenerate (Groq Cloud API — OpenAI-compatible) ---
 async function gorqGenerate({ prompt, type = "plan", diasPorSemana = 4 }) {
-  const url = GORQ_BASE_URL + (type === "plan" ? "/plan" : "/report");
-  const res = await fetch(url, {
+  if (!GORQ_API_KEY) throw new Error("[GROQ] GORQ_API_KEY não definida no .env");
+
+  const systemMsg = type === "plan"
+    ? "És um personal trainer experiente. Respondes APENAS com JSON válido, sem markdown nem texto extra."
+    : "És um analista de desempenho desportivo. Respondes APENAS com JSON válido, sem markdown nem texto extra.";
+
+  const response = await fetch(GROQ_API_URL, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${GORQ_API_KEY}` },
-    body: JSON.stringify({ prompt, diasPorSemana }),
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${GORQ_API_KEY}`
+    },
+    body: JSON.stringify({
+      model: GROQ_MODEL,
+      messages: [
+        { role: "system", content: systemMsg },
+        { role: "user", content: prompt }
+      ],
+      temperature: 0.7,
+      max_tokens: 2048,
+      response_format: { type: "json_object" }
+    }),
   });
-  if (!res.ok) throw new Error(`[GORQ] ${res.status} ${res.statusText}`);
-  return res.json();
+
+  if (!response.ok) {
+    const errBody = await response.text().catch(() => "");
+    throw new Error(`[GROQ] ${response.status} ${response.statusText}: ${errBody}`);
+  }
+
+  const data = await response.json();
+  const content = data.choices?.[0]?.message?.content;
+  if (!content) throw new Error("[GROQ] Resposta vazia da API");
+
+  try {
+    return JSON.parse(content);
+  } catch (parseErr) {
+    console.error("[GROQ] JSON inválido na resposta:", content.substring(0, 200));
+    throw new Error("[GROQ] Resposta da IA não é JSON válido");
+  }
 }
 
 // --- geminiGenerate (usado em /api/daily-phrase) ---
