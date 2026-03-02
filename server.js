@@ -31,15 +31,6 @@ const limiterAI = rateLimit({
   message: { erro: 'Demasiados pedidos. Tenta novamente mais tarde.' }
 });
 
-const limiterLogin = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 10,
-  message: { erro: 'Demasiadas tentativas. Aguarda 15 minutos.' },
-  keyGenerator: (req) => (req.body && req.body.email) ? req.body.email.toLowerCase() : req.ip,
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-
 // --- Constantes GORQ ---
 const GORQ_API_KEY  = process.env.GORQ_API_KEY;
 const GORQ_BASE_URL = "https://api.gorq.ai/v1";
@@ -590,6 +581,10 @@ app.get("/api/sessao/detalhes/:sessaoId", authenticateJWT, (req, res) => {
 
 app.get("/api/treino-com-data/:userId", authenticateJWT, (req, res) => {
   const { userId } = req.params;
+
+  if (parseInt(userId) !== req.user.id && req.user.tipo !== 1) {
+    return res.status(403).json({ erro: 'Acesso negado.' });
+  }
 
   const sql = `
     SELECT 
@@ -1268,7 +1263,7 @@ app.get("/api/treinos-admin", authenticateJWT, isAdmin, (req, res) => {
   });
 });
 
-app.get("/api/treino-admin/:id", authenticateJWT, (req, res) => {
+app.get("/api/treino-admin/:id", authenticateJWT, isAdmin, (req, res) => {
   const { id } = req.params;
 
   db.query("SELECT ta.id_treino_admin, ta.nome FROM treino_admin ta WHERE ta.id_treino_admin = ?", [id], (err, treinosRows) => {
