@@ -2,7 +2,7 @@ const db = require('../../config/db')
 
 const getOwnProfile = (req, res) => {
   const userId = req.user.id
-  db.query('SELECT id_users as id, userName, email, idade, peso, altura, id_tipoUser, created_at FROM users WHERE id_users = ?', [userId], (err, rows) => {
+  db.query('SELECT id_users as id, userName, email, idade, peso, altura, objetivo, peso_alvo, id_tipoUser, created_at FROM users WHERE id_users = ?', [userId], (err, rows) => {
     if (err) {
       console.error(err)
       return res.status(500).json({ erro: 'Erro ao obter perfil.' })
@@ -37,7 +37,7 @@ const getProfileById = (req, res) => {
   }
 
   db.query(
-    'SELECT id_users AS id, userName AS name, email, idade AS age, peso AS weight, altura AS height, id_tipoUser, created_at FROM users WHERE id_users = ?',
+    'SELECT id_users AS id, userName AS name, email, idade AS age, peso AS weight, altura AS height, objetivo, peso_alvo, id_tipoUser, created_at FROM users WHERE id_users = ?',
     [userId],
     (err, rows) => {
       if (err) {

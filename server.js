@@ -45,7 +45,11 @@ const allowedOrigins = process.env.NODE_ENV === 'production'
   : undefined;
 
 app.use(cors({ origin: allowedOrigins || '*', credentials: true }));
-app.use(express.json());
+// Stripe webhook precisa de raw body — excluir do express.json()
+app.use((req, res, next) => {
+  if (req.originalUrl === '/api/stripe/webhook') return next();
+  express.json()(req, res, next);
+});
 app.set('trust proxy', 1);
 
 // --- Middleware de autenticação JWT ---
@@ -1751,11 +1755,20 @@ app.post("/api/stripe/checkout-session", authenticateJWT, async (req, res) => {
 
   try {
     const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+
+    // Buscar email do user para linkar no Stripe
+    const userEmail = await new Promise((resolve) => {
+      db.query("SELECT email FROM users WHERE id_users = ?", [userId], (err, rows) => {
+        resolve(rows && rows.length ? rows[0].email : null);
+      });
+    });
+
     const session = await stripe.checkout.sessions.create({
       mode: "subscription",
       payment_method_types: ["card"],
       line_items: [{ price: process.env.STRIPE_PRICE_ID, quantity: 1 }],
       metadata: { userId: String(userId) },
+      customer_email: userEmail,
       success_url: `${baseUrl}/payment-return?status=sucesso`,
       cancel_url: `${baseUrl}/payment-return?status=cancelado`,
     });
@@ -1846,7 +1859,7 @@ app.get("/api/ai/report/:userId", authenticateJWT, limiterAI, async (req, res) =
   });
 
   const perfil = await new Promise((resolve) => {
-    db.query("SELECT userName, peso, altura, idade FROM users WHERE id_users = ?", [userId],
+    db.query("SELECT userName, peso, altura, idade, objetivo, peso_alvo FROM users WHERE id_users = ?", [userId],
       (err, rows) => resolve(err || !rows.length ? {} : rows[0]));
   });
 
@@ -1921,13 +1934,13 @@ app.get("/api/ai/plan/:userId", authenticateJWT, limiterAI, async (req, res) => 
   const mesAtual = `${agora.getFullYear()}-${String(agora.getMonth() + 1).padStart(2, "0")}`;
 
   const cached = await new Promise((resolve) => {
-    db.query("SELECT conteudo, criado_em FROM ai_planos WHERE user_id = ? AND mes = ?", [userId, mesAtual],
+    db.query("SELECT conteudo, criado_em, descanso_segundos FROM ai_planos WHERE user_id = ? AND mes = ?", [userId, mesAtual],
       (err, rows) => resolve(err || !rows.length ? null : rows[0]));
   });
 
   if (cached) {
-    try { return res.json({ sucesso: true, plano: JSON.parse(cached.conteudo), mes: mesAtual, criado_em: cached.criado_em, pode_gerar: false }); }
-    catch { return res.json({ sucesso: true, plano: cached.conteudo, mes: mesAtual, criado_em: cached.criado_em, pode_gerar: false }); }
+    try { return res.json({ sucesso: true, plano: JSON.parse(cached.conteudo), mes: mesAtual, criado_em: cached.criado_em, descanso_segundos: cached.descanso_segundos || 90, pode_gerar: false }); }
+    catch { return res.json({ sucesso: true, plano: cached.conteudo, mes: mesAtual, criado_em: cached.criado_em, descanso_segundos: cached.descanso_segundos || 90, pode_gerar: false }); }
   }
 
   res.json({ sucesso: true, plano: null, mes: mesAtual, pode_gerar: true });
@@ -1935,11 +1948,18 @@ app.get("/api/ai/plan/:userId", authenticateJWT, limiterAI, async (req, res) => 
 
 app.post("/api/ai/plan/:userId/generate", limiterAI, authenticateJWT, async (req, res) => {
   const { userId } = req.params;
-  const { diasPorSemana = 4 } = req.body;
-  const agora = new Date(); // ← CORRIGIDO: declarado localmente
+  const {
+    diasPorSemana = 4,
+    tempoTreino = 60,
+    objetivo,
+    targets = [],
+    condicoes = "",
+    descansoEntreSeriesSegundos = 90
+  } = req.body;
+  const agora = new Date();
 
   const userRow = await new Promise((resolve) => {
-    db.query("SELECT plano, plano_ativo_ate, peso, altura, idade, id_tipoUser FROM users WHERE id_users = ?", [userId], (err, rows) => {
+    db.query("SELECT plano, plano_ativo_ate, peso, altura, idade, objetivo, peso_alvo, id_tipoUser FROM users WHERE id_users = ?", [userId], (err, rows) => {
       if (err) { console.error("[AI plan POST] DB err:", err.message); return resolve(null); }
       resolve(rows.length ? rows[0] : null);
     });
@@ -1960,7 +1980,27 @@ app.post("/api/ai/plan/:userId/generate", limiterAI, authenticateJWT, async (req
   });
   if (existe) return res.status(400).json({ erro: "Já geraste o plano deste mês." });
 
-  const prompt = `Cria um plano de treino semanal para ${mesNome} para um utilizador com ${userRow.peso || "?"}kg, ${userRow.altura || "?"}cm, ${userRow.idade || "?"}anos.
+  // Construir prompt personalizado
+  const objFinal = objetivo || userRow.objetivo || "não definido";
+  const targetStr = targets.length > 0 ? `Dar mais ênfase a: ${targets.join(", ")}.` : "";
+  const condicoesStr = condicoes ? `Condições/notas do utilizador: "${condicoes}".` : "";
+
+  const prompt = `Cria um plano de treino personalizado para ${mesNome}.
+
+PERFIL DO UTILIZADOR:
+- Peso: ${userRow.peso || "?"}kg | Altura: ${userRow.altura || "?"}cm | Idade: ${userRow.idade || "?"}anos
+- Objetivo: ${objFinal}${userRow.peso_alvo ? ` (peso alvo: ${userRow.peso_alvo}kg)` : ""}
+- Dias de treino por semana: ${diasPorSemana}
+- Tempo disponível por treino: ${tempoTreino} minutos
+- Descanso entre séries: ${descansoEntreSeriesSegundos} segundos
+${targetStr ? `- ${targetStr}` : ""}
+${condicoesStr ? `- ${condicoesStr}` : ""}
+
+REGRAS:
+- Cada treino deve durar aproximadamente ${tempoTreino} minutos.
+- Adapta o número de exercícios e séries ao tempo disponível.
+- Inclui apenas os ${diasPorSemana} dias de treino (sem dias de descanso no array).
+${condicoes ? "- Respeita as condições/lesões mencionadas e adapta os exercícios em conformidade." : ""}
 
 Responde APENAS com JSON válido (sem markdown, sem código blocks) com exatamente esta estrutura:
 {
@@ -1974,17 +2014,17 @@ Responde APENAS com JSON válido (sem markdown, sem código blocks) com exatamen
       ]
     }
   ]
-}
-Inclui apenas os ${diasPorSemana} dias de treino (sem dias de descanso no array).`;
+}`;
 
   try {
     const gorqResp = await gorqGenerate({ prompt, type: "plan", diasPorSemana });
     const plano = gorqResp.plano || gorqResp;
-    db.query("INSERT INTO ai_planos (user_id, mes, conteudo) VALUES (?, ?, ?)",
-      [userId, mesAtual, JSON.stringify(plano)],
+    const parametros = JSON.stringify({ diasPorSemana, tempoTreino, objetivo: objFinal, targets, condicoes });
+    db.query("INSERT INTO ai_planos (user_id, mes, conteudo, parametros, descanso_segundos) VALUES (?, ?, ?, ?, ?)",
+      [userId, mesAtual, JSON.stringify(plano), parametros, descansoEntreSeriesSegundos],
       (err) => {
         if (err) { console.error("[AI][GORQ] Erro ao guardar plano:", err); return res.status(500).json({ erro: "Erro ao guardar plano" }); }
-        res.json({ sucesso: true, plano, mes: mesAtual, pode_gerar: false });
+        res.json({ sucesso: true, plano, mes: mesAtual, descanso_segundos: descansoEntreSeriesSegundos, pode_gerar: false });
       }
     );
   } catch (err) {
@@ -2116,6 +2156,100 @@ app.post("/api/stripe/portal", authenticateJWT, async (req, res) => {
       res.status(500).json({ erro: "Erro ao criar portal" });
     }
   });
+});
+
+// ================== STRIPE WEBHOOK ==================
+app.post("/api/stripe/webhook", express.raw({ type: 'application/json' }), async (req, res) => {
+  const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+  const sig = req.headers['stripe-signature'];
+  const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
+
+  let event;
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
+  } catch (err) {
+    console.error('[Stripe Webhook] Assinatura inválida:', err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  console.log(`[Stripe Webhook] Evento recebido: ${event.type}`);
+
+  switch (event.type) {
+    case 'checkout.session.completed': {
+      const session = event.data.object;
+      const userId = session.metadata?.userId;
+      const customerId = session.customer;
+      if (userId) {
+        db.query(
+          `UPDATE users SET plano = 'pago', plano_ativo_ate = DATE_ADD(NOW(), INTERVAL 1 MONTH), stripe_customer_id = ? WHERE id_users = ?`,
+          [customerId, userId],
+          (err) => {
+            if (err) console.error('[Stripe Webhook] Erro UPDATE checkout:', err.message);
+            else console.log(`[Stripe Webhook] User ${userId} → plano pago (customer: ${customerId})`);
+          }
+        );
+      }
+      break;
+    }
+    case 'invoice.paid': {
+      const invoice = event.data.object;
+      const customerId = invoice.customer;
+      db.query(
+        `UPDATE users SET plano = 'pago', plano_ativo_ate = DATE_ADD(NOW(), INTERVAL 1 MONTH) WHERE stripe_customer_id = ?`,
+        [customerId],
+        (err) => {
+          if (err) console.error('[Stripe Webhook] Renovação erro:', err.message);
+          else console.log(`[Stripe Webhook] Renovação OK: customer ${customerId}`);
+        }
+      );
+      break;
+    }
+    case 'customer.subscription.deleted': {
+      const sub = event.data.object;
+      const customerId = sub.customer;
+      db.query(
+        `UPDATE users SET plano = 'free' WHERE stripe_customer_id = ?`,
+        [customerId],
+        (err) => {
+          if (err) console.error('[Stripe Webhook] Cancelamento erro:', err.message);
+          else console.log(`[Stripe Webhook] Cancelamento: customer ${customerId} → free`);
+        }
+      );
+      break;
+    }
+  }
+
+  res.json({ received: true });
+});
+
+// ================== STRIPE VERIFY SESSION (fallback) ==================
+app.post("/api/stripe/verify-session", authenticateJWT, async (req, res) => {
+  const { sessionId } = req.body;
+  if (!sessionId) return res.status(400).json({ erro: "sessionId em falta" });
+
+  try {
+    const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+    const session = await stripe.checkout.sessions.retrieve(sessionId);
+
+    if (session.payment_status === 'paid') {
+      const userId = session.metadata?.userId;
+      const customerId = session.customer;
+      if (userId) {
+        await new Promise((resolve, reject) => {
+          db.query(
+            `UPDATE users SET plano = 'pago', plano_ativo_ate = DATE_ADD(NOW(), INTERVAL 1 MONTH), stripe_customer_id = ? WHERE id_users = ?`,
+            [customerId, userId],
+            (err) => err ? reject(err) : resolve()
+          );
+        });
+      }
+      return res.json({ sucesso: true, plano: "pago" });
+    }
+    res.json({ sucesso: false, status: session.payment_status });
+  } catch (err) {
+    console.error("[Stripe verify-session]", err.message);
+    res.status(500).json({ erro: "Erro ao verificar sessão" });
+  }
 });
 
 app.get("/payment-return", (req, res) => {
