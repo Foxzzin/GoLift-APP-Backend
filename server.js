@@ -135,26 +135,29 @@ async function geminiGenerate(prompt) {
 }
 
 // --- Modular route imports ---
-const recordesRoutes  = require('./routes/recordes/recordes.routes');
+// Rotas modulares sem conflito — mantidas activas
 // const sessoesRoutes   = require('./routes/sessoes/sessoes.routes'); // rota inline em /api/sessoes/:userId sobrepõe-se
 const utilsRoutes     = require('./routes/utils/utils.routes');
-const planoRoutes     = require('./routes/plano/plano.routes');
-const aiRoutes        = require('./routes/ai/ai.routes');
-const stripeRoutes    = require('./routes/stripe/stripe.routes');
-const comunidadeRoutes= require('./routes/comunidade/comunidade.routes');
 const treinoRoutes    = require('./routes/treino/treino.routes');
 const authRoutes      = require('./routes/auth/auth.routes');
 const userRoutes      = require('./routes/user/user.routes');
 const adminRoutes     = require('./routes/admin/admin.routes');
 
+// ⚠️ CONFLITO RESOLVIDO (02/03/2026): módulos abaixo interceptavam rotas inline com stubs/queries erradas
+// const recordesRoutes  = require('./routes/recordes/recordes.routes');     // inline L1088 é a correcta
+// const planoRoutes     = require('./routes/plano/plano.routes');           // inline L1701 é a correcta
+// const aiRoutes        = require('./routes/ai/ai.routes');                 // inline L1724+ é a correcta
+// const stripeRoutes    = require('./routes/stripe/stripe.routes');         // inline L1674, L2031 são as correctas
+// const comunidadeRoutes= require('./routes/comunidade/comunidade.routes');// inline L1458+ é a correcta (excepto PUT /:id — migrado inline)
+
 // --- Registo das rotas ---
 app.use('/api',            utilsRoutes);
-app.use('/api/recordes',   recordesRoutes);
-// app.use('/api/sessoes',    sessoesRoutes); // rota inline em server.js linha ~532 é a correcta
-app.use('/api/plano',      planoRoutes);
-app.use('/api/ai',         aiRoutes);
-app.use('/api/stripe',     stripeRoutes);
-app.use('/api/comunidades',comunidadeRoutes);
+// app.use('/api/recordes',   recordesRoutes);  // CONFLITO — inline L1088
+// app.use('/api/sessoes',    sessoesRoutes);    // rota inline em server.js linha ~532 é a correcta
+// app.use('/api/plano',      planoRoutes);      // CONFLITO — inline L1701
+// app.use('/api/ai',         aiRoutes);         // CONFLITO — inline L1724+
+// app.use('/api/stripe',     stripeRoutes);     // CONFLITO — inline L1674, L2031
+// app.use('/api/comunidades',comunidadeRoutes); // CONFLITO — inline L1458+
 app.use('/api/treinos',    treinoRoutes);
 app.use('/api',            authRoutes);
 app.use('/api',            userRoutes);  // expõe /api/profile/:userId
@@ -390,6 +393,8 @@ app.post("/api/treino", authenticateJWT, (req, res) => {
   if (nome.trim().length === 0) {
     return res.status(400).json({ erro: "O nome do treino não pode estar vazio." });
   }
+
+  console.log(`[TREINO] Criar: userId=${userId} nome="${nome}" exercicios=[${exercicios.join(',')}]`);
 
   db.query("SELECT id_users FROM users WHERE id_users = ?", [userId], (err, userRows) => {
     if (err) {
@@ -974,6 +979,8 @@ app.post("/api/treino/sessao/guardar", authenticateJWT, (req, res) => {
     return res.status(400).json({ erro: "treinoId e series são obrigatórios." });
   }
 
+  console.log(`[SESSAO] Guardar: userId=${userId} treinoId=${treinoId} duracao=${duracao_segundos}s series=${series.length}`);
+
   db.query(
     "INSERT INTO treino_sessao (id_treino, id_users, data_fim, duracao_segundos) VALUES (?, ?, NOW(), ?)",
     [treinoId, userId, duracao_segundos || 0],
@@ -1553,6 +1560,35 @@ app.get("/api/comunidades/:id/membros", authenticateJWT, (req, res) => {
   db.query(sql, [id], (err, results) => {
     if (err) { console.error("Erro ao obter membros:", err); return res.status(500).json({ erro: "Erro ao obter membros" }); }
     res.json(results || []);
+  });
+});
+
+// Atualizar comunidade (migrado de comunidade.routes.js — 02/03/2026)
+app.put("/api/comunidades/:id", authenticateJWT, (req, res) => {
+  const { id } = req.params;
+  const { nome, descricao } = req.body;
+  const userId = req.user.id;
+
+  if (!id || isNaN(id)) {
+    return res.status(400).json({ erro: "ID de comunidade inválido." });
+  }
+  if (!nome || typeof nome !== 'string' || nome.trim().length < 2) {
+    return res.status(400).json({ erro: "Nome é obrigatório e deve ter pelo menos 2 caracteres." });
+  }
+
+  // Verificar se o utilizador é o criador da comunidade ou admin
+  db.query("SELECT criador_id FROM comunidades WHERE id = ?", [id], (err, rows) => {
+    if (err) return res.status(500).json({ erro: "Erro na base de dados." });
+    if (!rows.length) return res.status(404).json({ erro: "Comunidade não encontrada." });
+    if (rows[0].criador_id !== userId && req.user.tipo !== 1) {
+      return res.status(403).json({ erro: "Acesso negado." });
+    }
+
+    db.query("UPDATE comunidades SET nome = ?, descricao = ? WHERE id = ?",
+      [nome.trim(), descricao != null ? descricao : null, id], (err2) => {
+      if (err2) return res.status(500).json({ erro: "Erro ao atualizar comunidade." });
+      res.json({ sucesso: true, mensagem: "Comunidade atualizada." });
+    });
   });
 });
 
