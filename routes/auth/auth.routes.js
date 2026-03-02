@@ -11,7 +11,7 @@ const limiterLogin = rateLimit({
   keyGenerator: (req) => (req.body && req.body.email) ? req.body.email.toLowerCase() : req.ip,
   standardHeaders: true,
   legacyHeaders: false,
-  validate: { ipAddress: false },
+  validate: { keyGeneratorIpFallback: false },
 });
 
 router.post('/login', limiterLogin, loginValidation, authController.login)
