@@ -2182,7 +2182,7 @@ app.post("/api/stripe/portal", authenticateJWT, async (req, res) => {
 });
 
 // ================== STRIPE WEBHOOK ==================
-app.post("/api/stripe/webhook", express.raw({ type: 'application/json' }), async (req, res) => {
+app.post("/api/stripe/webhook", express.raw({ type: '*/*' }), async (req, res) => {
   const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
   const sig = req.headers['stripe-signature'];
   const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
