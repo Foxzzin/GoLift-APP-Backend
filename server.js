@@ -47,8 +47,11 @@ const allowedOrigins = process.env.NODE_ENV === 'production'
 app.use(cors({ origin: allowedOrigins || '*', credentials: true }));
 // Stripe webhook precisa de raw body — excluir do express.json()
 app.use((req, res, next) => {
-  if (req.originalUrl === '/api/stripe/webhook') return next();
-  express.json()(req, res, next);
+  if (req.originalUrl === '/api/stripe/webhook') {
+    express.raw({ type: '*/*' })(req, res, next);
+  } else {
+    express.json()(req, res, next);
+  }
 });
 app.set('trust proxy', 1);
 
@@ -2182,7 +2185,7 @@ app.post("/api/stripe/portal", authenticateJWT, async (req, res) => {
 });
 
 // ================== STRIPE WEBHOOK ==================
-app.post("/api/stripe/webhook", express.raw({ type: '*/*' }), async (req, res) => {
+app.post("/api/stripe/webhook", async (req, res) => {
   const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
   const sig = req.headers['stripe-signature'];
   const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
