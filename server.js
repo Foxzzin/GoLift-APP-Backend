@@ -2188,12 +2188,13 @@ app.post("/api/stripe/portal", authenticateJWT, async (req, res) => {
 app.post("/api/stripe/webhook", async (req, res) => {
   const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
   const sig = req.headers['stripe-signature'];
-  const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
+  const endpointSecret = (process.env.STRIPE_WEBHOOK_SECRET || '').trim();
 
   // DEBUG TEMPORÁRIO
   console.log('[Stripe Webhook DEBUG] sig header presente:', !!sig);
   console.log('[Stripe Webhook DEBUG] body type:', typeof req.body, Buffer.isBuffer(req.body) ? 'Buffer' : 'NOT Buffer');
   console.log('[Stripe Webhook DEBUG] body length:', req.body?.length);
+  console.log('[Stripe Webhook DEBUG] secret length:', endpointSecret?.length);
   console.log('[Stripe Webhook DEBUG] secret primeiros 12 chars:', endpointSecret?.substring(0, 12));
 
   let event;
