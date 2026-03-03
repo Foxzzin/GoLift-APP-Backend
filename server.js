@@ -1136,6 +1136,7 @@ app.get("/api/recordes/:userId", authenticateJWT, (req, res) => {
   
   const sql = `
     SELECT 
+      ts.id_exercicio,
       e.nome as nome_exercicio,
       MAX(ts.peso) as peso,
       MAX(ts.data_serie) as data_serie
@@ -1152,6 +1153,28 @@ app.get("/api/recordes/:userId", authenticateJWT, (req, res) => {
     if (err) {
       console.error("[API] /api/recordes/:userId - Erro:", err);
       return res.status(500).json({ erro: "Erro ao obter recordes." });
+    }
+    res.json(rows);
+  });
+});
+
+// Histórico de progressão de um exercício específico
+app.get("/api/recordes/:userId/exercicio/:exercicioId", authenticateJWT, (req, res) => {
+  const { userId, exercicioId } = req.params;
+  if (parseInt(userId) !== req.user.id && req.user.tipo !== 1) {
+    return res.status(403).json({ erro: "Acesso negado." });
+  }
+  const sql = `
+    SELECT ts.peso, ts.repeticoes, ts.data_serie
+    FROM treino_serie ts
+    INNER JOIN treino_sessao sess ON ts.id_sessao = sess.id_sessao
+    WHERE sess.id_users = ? AND ts.id_exercicio = ? AND ts.peso > 0
+    ORDER BY ts.data_serie ASC
+  `;
+  db.query(sql, [userId, exercicioId], (err, rows) => {
+    if (err) {
+      console.error("[API] /api/recordes/:userId/exercicio/:exercicioId - Erro:", err);
+      return res.status(500).json({ erro: "Erro ao obter histórico." });
     }
     res.json(rows);
   });
