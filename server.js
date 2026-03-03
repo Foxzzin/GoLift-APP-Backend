@@ -1654,6 +1654,23 @@ app.put("/api/comunidades/:id", authenticateJWT, (req, res) => {
   });
 });
 
+app.delete("/api/comunidades/:id", authenticateJWT, (req, res) => {
+  const { id } = req.params;
+  const userId = req.user.id;
+
+  db.query("SELECT criador_id FROM comunidades WHERE id = ?", [id], (err, rows) => {
+    if (err) return res.status(500).json({ erro: "Erro na base de dados." });
+    if (!rows.length) return res.status(404).json({ erro: "Comunidade não encontrada." });
+    if (rows[0].criador_id !== userId && req.user.tipo !== 1) {
+      return res.status(403).json({ erro: "Acesso negado. Apenas o criador pode apagar a comunidade." });
+    }
+    db.query("DELETE FROM comunidades WHERE id = ?", [id], (err2) => {
+      if (err2) return res.status(500).json({ erro: "Erro ao apagar comunidade." });
+      res.json({ sucesso: true, mensagem: "Comunidade apagada com sucesso." });
+    });
+  });
+});
+
 app.get("/api/admin/comunidades", authenticateJWT, isAdmin, (req, res) => {
   const sql = `
     SELECT c.*, u.userName as criador_nome,
